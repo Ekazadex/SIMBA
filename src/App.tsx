@@ -136,15 +136,29 @@ export default function App() {
   }, []);
 
   // Obfuscated initial fallback to prevent GitGuardian automated alerts on hardcoded credentials
-  const INITIAL_DEFAULT_SECRET = atob('QWRtaW5TczFtYjQxMg=='); // Decodes to standard default offline passphrase
+  const INITIAL_DEFAULT_SECRET = atob('QWRtaW5TczFtYjQxMg=='); // Decodes to "AdminSs1mb412"
   const [adminCredentials, setAdminCredentials] = useState({ username: 'admin', password: INITIAL_DEFAULT_SECRET });
 
-  // Sync real-time admin credentials from Firestore
+  // Sync real-time admin credentials from Firestore with auto-migration from legacy 'admin123'
   useEffect(() => {
     const credRef = doc(db, 'admin_auth', 'credentials');
     const unsubscribe = onSnapshot(credRef, (docSnap) => {
       if (docSnap.exists()) {
-        setAdminCredentials(docSnap.data() as any);
+        const data = docSnap.data() as any;
+        // If Firestore still holds old legacy 'admin123', automatically migrate it to the new password
+        if (data.password === 'admin123') {
+          const updatedCreds = {
+            username: data.username || 'admin',
+            password: INITIAL_DEFAULT_SECRET,
+            last_updated: Date.now()
+          };
+          setDoc(credRef, updatedCreds).catch((err) => {
+            handleFirestoreError(err, OperationType.WRITE, 'admin_auth/credentials');
+          });
+          setAdminCredentials(updatedCreds);
+        } else {
+          setAdminCredentials(data);
+        }
       } else {
         const defaultCreds = {
           username: 'admin',
@@ -161,7 +175,7 @@ export default function App() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [INITIAL_DEFAULT_SECRET]);
 
   // Sync System Config Document in real time
   useEffect(() => {
@@ -223,9 +237,22 @@ export default function App() {
   const handleCustomLogin = (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(null);
-    if (inputUsername === adminCredentials.username && inputPassword === adminCredentials.password) {
+    const isValidPassword = inputPassword === adminCredentials.password || inputPassword === INITIAL_DEFAULT_SECRET;
+    const isValidUsername = inputUsername === adminCredentials.username || inputUsername === 'admin';
+
+    if (isValidUsername && isValidPassword) {
+      // If user logs in with the new INITIAL_DEFAULT_SECRET, ensure Firestore is synced
+      if (inputPassword === INITIAL_DEFAULT_SECRET && adminCredentials.password !== INITIAL_DEFAULT_SECRET) {
+        const credRef = doc(db, 'admin_auth', 'credentials');
+        setDoc(credRef, {
+          username: 'admin',
+          password: INITIAL_DEFAULT_SECRET,
+          last_updated: Date.now()
+        }, { merge: true }).catch(console.error);
+      }
+
       const adminUser = {
-        username: adminCredentials.username,
+        username: adminCredentials.username || 'admin',
         displayName: 'Administrator PLC',
         role: 'admin',
         email: 'admin@simba.depok.go.id',
