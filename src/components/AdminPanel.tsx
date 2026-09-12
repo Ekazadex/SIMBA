@@ -493,14 +493,6 @@ export default function AdminPanel({
             Buka Konsol PLC (Masuk)
           </button>
         </form>
-
-        <div className={`p-4 ${isDark ? 'bg-black/50 border-white/5' : 'bg-slate-50 border-slate-150'} rounded-xl border mt-6 text-left`}>
-          <span className="text-[10px] font-mono text-[#3B82F6] block mb-1 uppercase tracking-wider">KREDENSIAL DEFAULT SIMULASI:</span>
-          <span className={`text-[11px] ${isDark ? 'text-white/60' : 'text-slate-600'} font-sans block leading-normal`}>
-            Username: <code className="bg-black/20 text-[#3B82F6] px-1 py-0.5 rounded font-mono">admin</code><br />
-            Password: <code className="bg-black/20 text-[#3B82F6] px-1 py-0.5 rounded font-mono">admin123</code>
-          </span>
-        </div>
       </div>
     );
   }
