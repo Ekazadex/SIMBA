@@ -1115,7 +1115,9 @@ export default function SCADADashboard({
                 {/* Weather Header: SAAT INI */}
                 <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-sky-500 font-sans">
                   <span>SAAT INI</span>
-                  <Info className="w-3.5 h-3.5 text-sky-400 cursor-help" title="Informasi cuaca terpadu hulu aliran sungai Depok" />
+                  <span title="Informasi cuaca terpadu hulu aliran sungai Depok">
+                    <Info className="w-3.5 h-3.5 text-sky-400 cursor-help" />
+                  </span>
                 </div>
 
                 {/* Major Weather Information with Visual Icon and Temp */}
