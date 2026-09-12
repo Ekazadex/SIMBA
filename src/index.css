@@ -1,0 +1,26 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300..600;1,300..600&family=Playfair+Display:ital,wght@0,300..700;1,300..700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Playfair Display", Georgia, serif;
+  --font-display: "Playfair Display", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Custom grid patterns and SCADA styled aesthetics */
+.scada-grid {
+  background-size: 30px 30px;
+  background-image: linear-gradient(to right, rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+}
+
+.scada-led-blink {
+  animation: led-blink 1.5s infinite alternate;
+}
+
+@keyframes led-blink {
+  0% { opacity: 0.4; }
+  100% { opacity: 1; }
+}
+
