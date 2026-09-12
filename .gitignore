@@ -1,8 +1,71 @@
-node_modules/
-build/
-dist/
-coverage/
-.DS_Store
-*.log
-.env*
+# ==============================================================================
+# PROYEK CAPSTONE SIMBA SCADA - GITIGNORE
+# Proteksi Kredensial, File Rahasia, Build Artifacts, dan Cache Dependensi
+# ==============================================================================
+
+# 1. Environment Secrets & API Keys (KRUSIAL: Mencegah kebocoran API key ke publik)
+.env
+.env.*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 !.env.example
+
+# 2. Service Account Keys & Cloud Credentials
+*service-account*.json
+*credentials*.json
+*.pem
+*.key
+*.cert
+*.id_rsa
+
+# 3. Dependencies & Package Managers
+node_modules/
+.pnp
+.pnp.js
+
+# 4. Production Build & Bundler Outputs
+dist/
+dist-ssr/
+build/
+coverage/
+*.tsbuildinfo
+
+# 5. Logs & Debugging Files
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# 6. Operating System & Editor Artifacts
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# 7. IDE & Workspace Settings
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.sublime-workspace
+*.sublime-project
+.project
+.classpath
+.settings/
+
+# 8. Temporary & Backup Files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
