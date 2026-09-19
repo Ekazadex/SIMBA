@@ -38,13 +38,17 @@ import {
   ExternalLink,
   Sun,
   Moon,
-  Battery
+  Battery,
+  FileText,
+  Download,
+  X
 } from 'lucide-react';
 
 const NODE_ID = 'node-kukusan-01';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'admin'>('dashboard');
+  const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const [user, setUser] = useState<any>(null);
   const [isSimulatedUser, setIsSimulatedUser] = useState(false);
   const [config, setConfig] = useState<SystemConfig | null>(null);
@@ -190,7 +194,7 @@ export default function App() {
           threshold_siaga: 60,
           threshold_bahaya: 90,
           status_alat: 'Online',
-          auto_simulation: true,
+          auto_simulation: false, // Disabled by default to protect quota
           simulation_mode: 'dry',
           sampling_rate_seconds: 60,
           reference_height: 300
@@ -209,6 +213,8 @@ export default function App() {
 
   // Subscribe to the latest water level reading for ambient page tint alerts
   const [latestLevel, setLatestLevel] = useState<number>(0);
+  const [latestReadingTs, setLatestReadingTs] = useState<number | null>(null);
+  const [isAppDeviceOffline, setIsAppDeviceOffline] = useState<boolean>(false);
 
   useEffect(() => {
     const q = query(
@@ -222,12 +228,34 @@ export default function App() {
         if (data && typeof data.water_level === 'number') {
           setLatestLevel(data.water_level);
         }
+        let ts = data?.timestamp ?? data?.updated_at ?? data?.created_at;
+        if (typeof ts?.toMillis === 'function') ts = ts.toMillis();
+        else if (typeof ts?.toDate === 'function') ts = ts.toDate().getTime();
+        else if (typeof ts === 'string') ts = Date.parse(ts);
+        if (typeof ts === 'number') {
+          setLatestReadingTs(ts < 10000000000 ? ts * 1000 : ts);
+        }
       }
     }, (error) => {
       console.error("Error subscribing to latest reading in App:", error);
     });
     return () => unsubscribe();
   }, []);
+
+  // 30 seconds interval check to determine if hardware is offline (> 8 mins)
+  useEffect(() => {
+    const checkTimeout = () => {
+      if (!latestReadingTs) {
+        setIsAppDeviceOffline(false);
+        return;
+      }
+      const diffMs = Date.now() - latestReadingTs;
+      setIsAppDeviceOffline(diffMs > 8 * 60 * 1000); // 480.000 ms
+    };
+    checkTimeout();
+    const interval = setInterval(checkTimeout, 30000); // Check every 30 seconds
+    return () => clearInterval(interval);
+  }, [latestReadingTs]);
 
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [inputUsername, setInputUsername] = useState('');
@@ -292,10 +320,12 @@ export default function App() {
   const thresholdBahaya = config ? config.threshold_bahaya : 90;
 
   let currentAlertStatus: 'Normal' | 'Siaga' | 'Bahaya' = 'Normal';
-  if (latestLevel >= thresholdBahaya) {
-    currentAlertStatus = 'Bahaya';
-  } else if (latestLevel >= thresholdSiaga) {
-    currentAlertStatus = 'Siaga';
+  if (!isAppDeviceOffline) {
+    if (latestLevel >= thresholdBahaya) {
+      currentAlertStatus = 'Bahaya';
+    } else if (latestLevel >= thresholdSiaga) {
+      currentAlertStatus = 'Siaga';
+    }
   }
 
   // Real-time audio-reactive or wave-pulsed overlay animation
@@ -409,7 +439,7 @@ export default function App() {
           {/* Visual Hardware Battery Status Indicator */}
           <span className={`text-[9px] font-mono px-2 py-0.5 rounded border flex items-center gap-1 ${batteryColorClass}`} title={isBatteryCharging ? 'Baterai Pengisian Daya via Solar Panel (Siang)' : 'Baterai Menggunakan Daya Cadangan (Malam)'}>
             <Battery className="w-3.5 h-3.5 mr-0.5" />
-            <span>BATT {batteryLevel}% {isBatteryCharging ? '⚡ CHARGING' : 'DISCHARGING'}</span>
+            <span>BATT {batteryLevel}% {isBatteryCharging ? '(CHARGING)' : '(DISCHARGING)'}</span>
           </span>
         </div>
 
@@ -462,6 +492,20 @@ export default function App() {
             >
               <ShieldCheck className="w-3.5 h-3.5" />
               Kontrol PLC
+            </button>
+
+            <button
+              id="btn-open-reports"
+              onClick={() => setIsReportModalOpen(true)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold tracking-wide transition-all cursor-pointer border ${
+                isDark 
+                  ? 'bg-amber-500/10 text-amber-400 border-amber-500/30 hover:bg-amber-500/20' 
+                  : 'bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100'
+              }`}
+              title="Download File Laporan Pekan 4 (.md)"
+            >
+              <FileText className="w-3.5 h-3.5 text-amber-500" />
+              <span>Laporan Pekan 4 (.md)</span>
             </button>
           </div>
 
@@ -521,8 +565,18 @@ export default function App() {
         </div>
       </nav>
 
-      {/* SYSTEM WARNING BANNER IF IN BAHAYA */}
-      {config && config.status_alat === 'Online' && (
+      {/* SYSTEM WARNING BANNER IF IN BAHAYA OR OFFLINE */}
+      {isAppDeviceOffline ? (
+        <div id="alert-banner" className={`${
+          isDark 
+            ? 'bg-slate-900/80 border-b border-white/10 text-slate-400' 
+            : 'bg-slate-100 border-b border-slate-300 text-slate-600'
+        } text-[11px] px-4 py-2 flex items-center justify-center gap-2 text-center font-mono uppercase tracking-wider`}>
+          <span className="w-2 h-2 rounded-full bg-slate-400 inline-block" />
+          <span className={`font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>[ STATUS OFFLINE ] :</span>
+          <span>Perangkat RTU ESP32 tidak mengirim data baru lebih dari 8 menit. Telemetri otomatis dibekukan.</span>
+        </div>
+      ) : config && config.status_alat === 'Online' && (
         <div id="alert-banner" className={`${
           isDark 
             ? 'bg-rose-950/20 border-b border-white/5 text-rose-300' 
@@ -668,6 +722,165 @@ export default function App() {
               </button>
             </form>
 
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DOWNLOAD LAPORAN PEKAN 4 (.MD) */}
+      {isReportModalOpen && (
+        <div id="modal-download-reports" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in">
+          <div className={`w-full max-w-lg rounded-2xl border p-6 shadow-2xl relative ${
+            isDark ? 'bg-[#0f172a] border-white/10 text-white' : 'bg-white border-slate-200 text-slate-900'
+          }`}>
+            {/* Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-white/10 mb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-amber-500/10 text-amber-500 border border-amber-500/20">
+                  <FileText className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold leading-tight">Unduh Laporan Pekan 4 (.md)</h3>
+                  <p className="text-[11px] text-slate-400">Capstone Desain Proyek 2 — Kelompok 12 SIMBA SCADA</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setIsReportModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-all cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400 mb-5 leading-relaxed">
+              Pilih file dokumen format Markdown (<code className="text-amber-400">.md</code>) di bawah ini untuk diunduh langsung ke komputer Anda. File ini diformat rapi dan siap di-copy-paste ke Microsoft Word untuk diserahkan ke Dosen Pembimbing.
+            </p>
+
+            {/* List of Downloadable Files */}
+            <div className="space-y-3 mb-6">
+              {/* File 1: Frontend Ekananda */}
+              <a 
+                href="/LAPORAN_PEKAN_4_FRONTEND_EKANANDA.md" 
+                download="LAPORAN_PEKAN_4_FRONTEND_EKANANDA.md"
+                className={`flex items-center justify-between p-3.5 rounded-xl border transition-all cursor-pointer ${
+                  isDark 
+                    ? 'bg-white/5 border-white/10 hover:border-blue-500 hover:bg-blue-500/10' 
+                    : 'bg-slate-50 border-slate-200 hover:border-blue-500 hover:bg-blue-50'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-blue-500/10 text-[#3B82F6] flex items-center justify-center font-bold text-xs">
+                    FE
+                  </div>
+                  <div className="text-left">
+                    <div className="text-xs font-bold flex items-center gap-2">
+                      <span>Laporan Frontend (Ekananda Zhafif Dean)</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 font-mono">.md</span>
+                    </div>
+                    <div className="text-[10px] text-slate-400">Fokus: Client-side timeout 8 menit, RTU offline, elevasi "-- cm"</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#3B82F6] hover:bg-blue-600 text-black font-bold text-[11px]">
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Unduh</span>
+                </div>
+              </a>
+
+              {/* File 2: Backend Iqbal */}
+              <a 
+                href="/LAPORAN_PEKAN_4_BACKEND_IQBAL.md" 
+                download="LAPORAN_PEKAN_4_BACKEND_IQBAL.md"
+                className={`flex items-center justify-between p-3.5 rounded-xl border transition-all cursor-pointer ${
+                  isDark 
+                    ? 'bg-white/5 border-white/10 hover:border-emerald-500 hover:bg-emerald-500/10' 
+                    : 'bg-slate-50 border-slate-200 hover:border-emerald-500 hover:bg-emerald-50'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center font-bold text-xs">
+                    BE
+                  </div>
+                  <div className="text-left">
+                    <div className="text-xs font-bold flex items-center gap-2">
+                      <span>Laporan Backend (Muhammad Iqbal)</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-mono">.md</span>
+                    </div>
+                    <div className="text-[10px] text-slate-400">Fokus: Batch 360 sampel, fusi suhu DHT22, REST API & Cupcarbon</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-black font-bold text-[11px]">
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Unduh</span>
+                </div>
+              </a>
+
+              {/* File 3: Panduan Push Git */}
+              <a 
+                href="/PANDUAN_GIT_PUSH_PEKAN_4.md" 
+                download="PANDUAN_GIT_PUSH_PEKAN_4.md"
+                className={`flex items-center justify-between p-3.5 rounded-xl border transition-all cursor-pointer ${
+                  isDark 
+                    ? 'bg-white/5 border-white/10 hover:border-amber-500 hover:bg-amber-500/10' 
+                    : 'bg-slate-50 border-slate-200 hover:border-amber-500 hover:bg-amber-50'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-amber-500/10 text-amber-400 flex items-center justify-center font-bold text-xs">
+                    GIT
+                  </div>
+                  <div className="text-left">
+                    <div className="text-xs font-bold flex items-center gap-2">
+                      <span>Panduan Push Git & Whitelist File</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-mono">.md</span>
+                    </div>
+                    <div className="text-[10px] text-slate-400">Perintah terminal lengkap, proteksi .env, dan panduan bukti foto</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-black font-bold text-[11px]">
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Unduh</span>
+                </div>
+              </a>
+
+              {/* File 4: Bundle Lengkap */}
+              <a 
+                href="/LAPORAN_PEKAN_4_LENGKAP_TIM_SCADA.md" 
+                download="LAPORAN_PEKAN_4_LENGKAP_TIM_SCADA.md"
+                className={`flex items-center justify-between p-3.5 rounded-xl border transition-all cursor-pointer ${
+                  isDark 
+                    ? 'bg-purple-500/10 border-purple-500/30 hover:bg-purple-500/20' 
+                    : 'bg-purple-50 border-purple-200 hover:bg-purple-100'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-purple-500/20 text-purple-400 flex items-center justify-center font-bold text-xs">
+                    ALL
+                  </div>
+                  <div className="text-left">
+                    <div className="text-xs font-bold flex items-center gap-2 text-purple-400">
+                      <span>Bundle Lengkap (Semua Laporan & Panduan)</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-500/30 text-purple-300 font-mono">.md</span>
+                    </div>
+                    <div className="text-[10px] text-slate-400">Gabungan seluruh laporan FE, BE, dan tutorial Git dalam 1 file</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-500 hover:bg-purple-600 text-black font-bold text-[11px]">
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Unduh</span>
+                </div>
+              </a>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-white/10">
+              <span className="text-[10px] text-slate-400">
+                Setelah selesai diunduh, file di <code className="text-amber-400">public/</code> dapat Anda hapus kapan saja.
+              </span>
+              <button
+                onClick={() => setIsReportModalOpen(false)}
+                className="px-4 py-2 text-xs font-semibold rounded-lg bg-slate-500/10 hover:bg-slate-500/20 text-slate-300 transition-all cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
           </div>
         </div>
       )}

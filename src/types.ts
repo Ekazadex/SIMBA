@@ -6,6 +6,8 @@
 export interface SensorReading {
   id?: string;
   timestamp: number; // epoch milliseconds
+  updated_at?: any;
+  created_at?: any;
   water_level: number; // in cm (Tinggi Muka Air dari dasar sungai)
   local_rain: number; // 0: None, 1: Light, 2: Medium, 3: Heavy
   temperature: number; // in Celsius
@@ -13,7 +15,8 @@ export interface SensorReading {
   node_id: string;
   distance?: number; // raw ultrasonic distance in cm (jarak sensor ke air)
   source?: 'Hardware-ESP32' | 'Hardware-ESP32-Batch' | 'Simulator-Engine' | 'Manual-Peil-Schaal' | string;
-  samples_count?: number; // count of raw ultrasonic samples in batch
+  samples_count?: number; // count of raw ultrasonic samples in batch (e.g. 360 samples)
+  batch_data?: Array<[string | number, number]>; // Array 360 sampel: [[timestamp, water_level], ...]
   notes?: string; // Catatan lapangan khusus (misal jika sensor error atau observasi visual)
   operator?: string; // Nama petugas penginput data manual
 }

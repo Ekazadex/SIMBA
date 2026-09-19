@@ -27,7 +27,6 @@ import {
   TrendingUp, 
   TrendingDown, 
   Clock, 
-  Globe, 
   BookOpen, 
   ShieldAlert,
   ChevronRight,
@@ -40,7 +39,8 @@ import {
   Info,
   ClipboardCheck,
   Sliders,
-  Radio
+  Radio,
+  CheckCircle2
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -53,6 +53,30 @@ import {
   Legend, 
   ReferenceLine 
 } from 'recharts';
+
+/**
+ * Extracts a numeric timestamp (milliseconds) from various Firestore field formats
+ * (e.g. number, Timestamp object, ISO date string) checking timestamp, updated_at, or created_at.
+ */
+export function extractReadingTimestamp(data: any): number | null {
+  if (!data) return null;
+  const raw = data.timestamp ?? data.updated_at ?? data.created_at;
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === 'number') {
+    return raw < 10000000000 ? raw * 1000 : raw;
+  }
+  if (typeof raw?.toMillis === 'function') {
+    return raw.toMillis();
+  }
+  if (typeof raw?.toDate === 'function') {
+    return raw.toDate().getTime();
+  }
+  if (typeof raw === 'string') {
+    const parsed = Date.parse(raw);
+    if (!isNaN(parsed)) return parsed;
+  }
+  return null;
+}
 
 interface SCADADashboardProps {
   config: SystemConfig | null;
@@ -87,8 +111,6 @@ export default function SCADADashboard({
   const [isLoading, setIsLoading] = useState(true);
   const [aiLoading, setAiLoading] = useState(false);
   const [advisory, setAdvisory] = useState<string>('');
-  const [newsContent, setNewsContent] = useState<string>('');
-  const [searchingNews, setSearchingNews] = useState(false);
 
   // Live Grounded Weather & Sound Warning systems
   const [liveWeather, setLiveWeather] = useState<{
@@ -109,6 +131,67 @@ export default function SCADADashboard({
   const [soundEnabled, setSoundEnabled] = useState(false);
   const [chartRange, setChartRange] = useState<'realtime' | '24h'>('realtime');
   const [chartViewMode, setChartViewMode] = useState<'elevation' | 'raw_ultrasonic'>('elevation');
+  const [useBatch360Mode, setUseBatch360Mode] = useState<boolean>(false);
+  const [timeAgoText, setTimeAgoText] = useState<string>('Menunggu pembacaan data...');
+
+  // Hardware status timeout detection: 8 minutes tolerance (480,000 ms)
+  // ESP32 sends batch data every 6 minutes; if gap > 8 mins, hardware is offline
+  const TIMEOUT_TOLERANCE_MS = 8 * 60 * 1000; // 480.000 ms (8 menit)
+  const [isDeviceOffline, setIsDeviceOffline] = useState<boolean>(false);
+
+  // Client-Side Timeout Check running every 30 seconds
+  useEffect(() => {
+    const checkDeviceTimeout = () => {
+      if (!latestReading) {
+        setIsDeviceOffline(false);
+        return;
+      }
+      const readingTs = extractReadingTimestamp(latestReading);
+      if (!readingTs) {
+        setIsDeviceOffline(false);
+        return;
+      }
+      const now = Date.now();
+      const diffMs = now - readingTs;
+      const timedOut = diffMs > TIMEOUT_TOLERANCE_MS;
+      setIsDeviceOffline(timedOut);
+    };
+
+    // Run check immediately when latestReading changes or on mount
+    checkDeviceTimeout();
+
+    // Check automatically every 30 seconds (30.000 ms)
+    const timeoutTimer = setInterval(checkDeviceTimeout, 30000);
+    return () => clearInterval(timeoutTimer);
+  }, [latestReading]);
+
+  // Pure client-side elapsed timer for "Data received X min ago" without querying Firestore repeatedly
+  useEffect(() => {
+    const calculateTimeAgo = () => {
+      const readingTs = extractReadingTimestamp(latestReading);
+      if (!readingTs) {
+        setTimeAgoText('Menunggu data...');
+        return;
+      }
+      const now = Date.now();
+      const diffMs = Math.max(0, now - readingTs);
+      const diffSec = Math.floor(diffMs / 1000);
+      const diffMin = Math.floor(diffSec / 60);
+      const diffHour = Math.floor(diffMin / 60);
+
+      if (diffSec < 60) {
+        setTimeAgoText(`Data diterima ${diffSec} detik yang lalu`);
+      } else if (diffMin < 60) {
+        setTimeAgoText(`Data diterima ${diffMin} menit yang lalu`);
+      } else {
+        setTimeAgoText(`Data diterima ${diffHour} jam ${diffMin % 60} menit yang lalu`);
+      }
+    };
+
+    calculateTimeAgo();
+    const timer = setInterval(calculateTimeAgo, 5000); // 5s client-side local timer tick
+    return () => clearInterval(timer);
+  }, [latestReading]);
 
   // Keep track of the active custom Audio object and synthesizer loops to prevent overlap
   const activeAudioRef = React.useRef<HTMLAudioElement | null>(null);
@@ -234,13 +317,19 @@ export default function SCADADashboard({
 
   // Bind real-time Firestore listeners for readings, predictions, BMKG data and config
   useEffect(() => {
-    // 1. Listen for recent sensor readings (last 120)
+    // 1. Listen for recent sensor readings (last 40 documents for low quota footprint)
     const unsubscribeReadings = onSnapshot(
-      getFirestoreQuery('sensor_readings', 120),
+      getFirestoreQuery('sensor_readings', 40),
       (snapshot) => {
         const data: SensorReading[] = [];
         snapshot.forEach((doc) => {
-          data.push({ id: doc.id, ...doc.data() } as SensorReading);
+          const docData = doc.data();
+          const parsedTs = extractReadingTimestamp(docData);
+          data.push({ 
+            id: doc.id, 
+            ...docData,
+            timestamp: parsedTs ?? (docData.timestamp || Date.now())
+          } as SensorReading);
         });
         // Sort ascending for chart
         const sorted = data.sort((a, b) => a.timestamp - b.timestamp);
@@ -362,24 +451,6 @@ export default function SCADADashboard({
       setAdvisory('⚠️ Gagal menghubungkan ke server Gemini High-Thinking. Menampilkan diagnosis pemodelan fisik standard.');
     } finally {
       setAiLoading(false);
-    }
-  };
-
-  // Trigger Google Search Grounding for Live Flood news
-  const fetchLiveNews = async () => {
-    setSearchingNews(true);
-    try {
-      const res = await fetch('/api/search-news', {
-        method: 'POST'
-      });
-      if (!res.ok) throw new Error('News search failed');
-      const data = await res.json();
-      setNewsContent(data.text);
-    } catch (err) {
-      console.error(err);
-      setNewsContent('Gagal memuat berita terkini. Silakan periksa koneksi jaringan.');
-    } finally {
-      setSearchingNews(false);
     }
   };
 
@@ -610,11 +681,8 @@ export default function SCADADashboard({
     }
   };
 
-  // Run initial news and weather fetch on dashboard open
+  // Run initial weather fetch on dashboard open
   useEffect(() => {
-    if (!newsContent) {
-      fetchLiveNews();
-    }
     if (!liveWeather) {
       fetchLiveWeather();
     }
@@ -625,12 +693,19 @@ export default function SCADADashboard({
   const thresholdSiaga = config ? config.threshold_siaga : 60;
   const thresholdBahaya = config ? config.threshold_bahaya : 90;
 
-  let alertStatus: 'Normal' | 'Siaga' | 'Bahaya' = 'Normal';
+  let alertStatus: 'Normal' | 'Siaga' | 'Bahaya' | 'Offline' = 'Normal';
   let alertBg = 'bg-[#3B82F6]/10 border border-[#3B82F6]/25 text-[#3B82F6]';
   let alertLed = 'bg-[#3B82F6]';
   let alertLabel = 'SYSTEM OPTIMAL / AMAN';
 
-  if (currentLevel >= thresholdBahaya) {
+  if (isDeviceOffline) {
+    alertStatus = 'Offline';
+    alertBg = isDark 
+      ? 'bg-slate-800/50 border border-slate-700/60 text-slate-400' 
+      : 'bg-slate-100 border border-slate-300 text-slate-600';
+    alertLed = 'bg-slate-400';
+    alertLabel = 'ALAT OFFLINE / TIDAK ADA DATA BARU';
+  } else if (currentLevel >= thresholdBahaya) {
     alertStatus = 'Bahaya';
     alertBg = 'bg-rose-500/10 border border-rose-500/20 text-rose-400';
     alertLed = 'bg-rose-500 scada-led-blink';
@@ -644,7 +719,7 @@ export default function SCADADashboard({
 
   // Audio Warning Loop Effect (respects soundEnabled and operator preferences)
   useEffect(() => {
-    if (!soundEnabled || alertStatus === 'Normal') {
+    if (!soundEnabled || alertStatus === 'Normal' || alertStatus === 'Offline') {
       stopCurrentAudio();
       return;
     }
@@ -677,7 +752,7 @@ export default function SCADADashboard({
   }, []);
 
   // Browser Push Notifications on alert transitions (respects user preferences)
-  const lastAlertStatusRef = React.useRef<'Normal' | 'Siaga' | 'Bahaya'>('Normal');
+  const lastAlertStatusRef = React.useRef<'Normal' | 'Siaga' | 'Bahaya' | 'Offline'>('Normal');
 
   useEffect(() => {
     if (alertStatus === lastAlertStatusRef.current) return;
@@ -734,28 +809,39 @@ export default function SCADADashboard({
   };
 
   // Prepares the multi-series charting data combining actual readings and predictions
+  const hasBatchData = Boolean(latestReading?.batch_data && latestReading.batch_data.length > 0);
   const activeReadings = chartRange === 'realtime' ? readingsList.slice(-20) : readingsList;
   const refHeight = config?.reference_height || 300;
-  const chartData = activeReadings.map((r) => {
-    const formattedTime = new Date(r.timestamp).toLocaleTimeString('id-ID', {
-      hour: '2-digit',
-      minute: '2-digit',
-      ...(chartRange === 'realtime' ? { second: '2-digit' } : {})
-    });
-    // Calculate raw ultrasonic distance (cm) if not explicitly present in legacy documents
-    const ultrasonicDistance = typeof r.distance === 'number' 
-      ? r.distance 
-      : Math.max(0, Math.round((refHeight - r.water_level) * 10) / 10);
+  
+  const chartData = (useBatch360Mode && hasBatchData) 
+    ? (latestReading?.batch_data || []).map(([timeLabel, val]) => ({
+        time: timeLabel,
+        elevasi: val,
+        raw_distance: Math.max(0, Math.round((refHeight - val) * 10) / 10),
+        local_rain: 0,
+        suhu: latestReading?.temperature || 28,
+        source: 'Batch 360'
+      }))
+    : activeReadings.map((r) => {
+        const formattedTime = new Date(r.timestamp).toLocaleTimeString('id-ID', {
+          hour: '2-digit',
+          minute: '2-digit',
+          ...(chartRange === 'realtime' ? { second: '2-digit' } : {})
+        });
+        // Calculate raw ultrasonic distance (cm) if not explicitly present in legacy documents
+        const ultrasonicDistance = typeof r.distance === 'number' 
+          ? r.distance 
+          : Math.max(0, Math.round((refHeight - r.water_level) * 10) / 10);
 
-    return {
-      time: formattedTime,
-      elevasi: r.water_level,
-      raw_distance: ultrasonicDistance,
-      local_rain: r.local_rain * 30, // scaled for chart visibility
-      suhu: r.temperature,
-      source: r.source || 'Standard'
-    };
-  });
+        return {
+          time: formattedTime,
+          elevasi: r.water_level,
+          raw_distance: ultrasonicDistance,
+          local_rain: r.local_rain * 30, // scaled for chart visibility
+          suhu: r.temperature,
+          source: r.source || 'Standard'
+        };
+      });
 
   // Future Prediction Points
   const predictionCurves = latestPrediction ? [
@@ -787,7 +873,12 @@ export default function SCADADashboard({
         <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
           {/* Signal Indicator & Hardware Status */}
           <div className={`flex items-center gap-2 px-3 py-2 ${themeBgInner} rounded-xl text-[10px] uppercase tracking-wider text-slate-500`}>
-            {latestReading?.source?.includes('Manual') || latestReading?.source?.includes('Peil') ? (
+            {isDeviceOffline ? (
+              <>
+                <span className="w-2 h-2 rounded-full bg-slate-400" />
+                <span className="font-mono text-slate-400 font-bold">RTU ESP32 // OFFLINE</span>
+              </>
+            ) : latestReading?.source?.includes('Manual') || latestReading?.source?.includes('Peil') ? (
               <>
                 <ClipboardCheck className="w-3.5 h-3.5 text-amber-400" />
                 <span className="font-mono text-amber-400 font-bold">PEIL SCHAAL // INPUT MANUAL</span>
@@ -810,10 +901,10 @@ export default function SCADADashboard({
             )}
           </div>
 
-          {/* Sync Time Status */}
+          {/* Relative Elapsed Time Indicator */}
           <div className={`flex items-center gap-2 px-3 py-2 ${themeBgInner} rounded-xl text-[10px] uppercase tracking-wider text-slate-500`}>
             <Clock className="w-3.5 h-3.5 text-[#3B82F6]" />
-            <span className="font-mono">SYNC // {latestReading ? new Date(latestReading.timestamp).toLocaleTimeString('id-ID') : '--:--:--'}</span>
+            <span className="font-mono">{timeAgoText}</span>
           </div>
 
           {/* Audio Alarm Switch */}
@@ -849,6 +940,44 @@ export default function SCADADashboard({
         </div>
       </div>
 
+      {/* HARDWARE DATA PAUSE & REAL-TIME QUOTA SAVER BANNER */}
+      <div id="scada-hardware-pause-banner" className={`col-span-12 p-4 rounded-2xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${
+        latestReading?.source?.includes('Hardware')
+          ? isDark ? 'bg-emerald-950/20 border-emerald-500/30 text-emerald-400' : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+          : isDark ? 'bg-black/40 border-white/10 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
+      }`}>
+        <div className="flex items-center gap-3">
+          <span className="relative flex h-3 w-3 shrink-0">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+          </span>
+          <div className="text-xs">
+            <div className="flex items-center gap-2 font-mono font-bold tracking-wider uppercase">
+              {latestReading?.source?.includes('Hardware') ? (
+                <>
+                  <Radio className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>SUMBER TELEMETRI: HARDWARE ESP32 (BATCH 360 SAMPEL)</span>
+                </>
+              ) : (
+                <>
+                  <Activity className="w-3.5 h-3.5 text-[#3B82F6]" />
+                  <span>STATUS MONITORING: STANDBY PAUSED (LAPORAN TERAKHIR)</span>
+                </>
+              )}
+            </div>
+            <span className="text-[11px] opacity-80 mt-0.5 block font-sans">
+              {timeAgoText} — Tidak ada pembacaan Firestore berulang. Sistem tetap terjeda pada laporan terakhir hingga paket transmisi baru masuk.
+            </span>
+          </div>
+        </div>
+        {latestReading?.batch_data && (
+          <span className="px-2.5 py-1 bg-[#3B82F6]/15 border border-[#3B82F6]/30 text-[#3B82F6] rounded-lg text-[10px] font-mono font-bold shrink-0 flex items-center gap-1.5">
+            <CheckCircle2 className="w-3.5 h-3.5" />
+            Array 360 Titik Siap Ditampilkan
+          </span>
+        )}
+      </div>
+
       {/* DETAILED MEASUREMENT GAUGES & METRICS */}
       <div id="measurement-grid" className="col-span-12 lg:col-span-4 flex flex-col gap-6">
         
@@ -857,7 +986,12 @@ export default function SCADADashboard({
           <div className="flex justify-between items-center mb-4">
             <span className={`text-[10px] font-bold uppercase tracking-[0.25em] ${themeTextMuted} font-mono`}>Tinggi Elevasi Air</span>
             <div className="flex items-center gap-1.5">
-              {latestReading?.source?.includes('Manual') || latestReading?.source?.includes('Peil') ? (
+              {isDeviceOffline ? (
+                <span className="px-2.5 py-1 bg-slate-500/20 border border-slate-500/40 rounded-lg text-[10px] font-mono text-slate-400 font-bold tracking-wider uppercase flex items-center gap-1.5 shadow-sm">
+                  <span className="w-2 h-2 rounded-full bg-slate-400" />
+                  PERANGKAT OFFLINE
+                </span>
+              ) : latestReading?.source?.includes('Manual') || latestReading?.source?.includes('Peil') ? (
                 <span className="px-2.5 py-1 bg-amber-500/20 border border-amber-500/40 rounded-lg text-[10px] font-mono text-amber-400 font-bold tracking-wider uppercase flex items-center gap-1.5 shadow-sm">
                   <ClipboardCheck className="w-3 h-3 text-amber-400" />
                   MANUAL PEIL SCHAAL
@@ -883,22 +1017,34 @@ export default function SCADADashboard({
           <div className="flex items-baseline justify-between gap-4">
             <div className="flex flex-col">
               <span className={`text-5xl font-sans font-light tracking-tighter leading-none ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                {latestReading ? latestReading.water_level : '0.0'}<span className="text-lg font-normal text-slate-400"> cm</span>
+                {isDeviceOffline ? (
+                  <>--<span className="text-lg font-normal text-slate-400"> cm</span></>
+                ) : (
+                  <>{latestReading ? latestReading.water_level : '0.0'}<span className="text-lg font-normal text-slate-400"> cm</span></>
+                )}
               </span>
               <span className={`text-[11px] ${themeTextSub} mt-2 font-sans flex items-center gap-1.5`}>
-                {latestReading && latestReading.water_level >= thresholdSiaga ? (
-                  <TrendingUp className="w-3.5 h-3.5 text-rose-500 animate-bounce" />
-                ) : (
-                  <TrendingDown className="w-3.5 h-3.5 text-emerald-500" />
-                )}
-                {latestReading?.source?.includes('Manual') ? (
-                  <span className="text-amber-400 font-bold">
-                    Petugas: {latestReading.operator || 'Staf Lapangan'}
+                {isDeviceOffline ? (
+                  <span className="text-slate-400 font-mono">
+                    Perangkat offline (&gt;8 mnt). Data telemetri terakhir dibekukan.
                   </span>
-                ) : latestReading?.distance != null ? (
-                  `Jarak Pantul Sensor: ${latestReading.distance} cm (${latestReading.source || 'RTU'})`
                 ) : (
-                  'Fluktuasi: ±0.4 cm (Kompensasi Suhu)'
+                  <>
+                    {latestReading && latestReading.water_level >= thresholdSiaga ? (
+                      <TrendingUp className="w-3.5 h-3.5 text-rose-500 animate-bounce" />
+                    ) : (
+                      <TrendingDown className="w-3.5 h-3.5 text-emerald-500" />
+                    )}
+                    {latestReading?.source?.includes('Manual') ? (
+                      <span className="text-amber-400 font-bold">
+                        Petugas: {latestReading.operator || 'Staf Lapangan'}
+                      </span>
+                    ) : latestReading?.distance != null ? (
+                      `Jarak Pantul Sensor: ${latestReading.distance} cm (${latestReading.source || 'RTU'})`
+                    ) : (
+                      'Fluktuasi: ±0.4 cm (Kompensasi Suhu)'
+                    )}
+                  </>
                 )}
               </span>
 
@@ -997,7 +1143,7 @@ export default function SCADADashboard({
                 <div className="bg-black/85 border border-white/10 rounded px-1.5 py-0.5 text-left shadow">
                   <span className="text-[6px] text-slate-400 block uppercase leading-none mb-0.5">Jarak Sensor ke Air (d)</span>
                   <span className="text-[10px] font-bold text-sky-400 leading-none">
-                    {config ? Math.max(0, config.reference_height - currentLevel) : 300 - currentLevel} cm
+                    {isDeviceOffline ? '-- cm' : `${config ? Math.max(0, config.reference_height - currentLevel) : 300 - currentLevel} cm`}
                   </span>
                 </div>
               </div>
@@ -1007,7 +1153,7 @@ export default function SCADADashboard({
                 <div className="bg-black/85 border border-white/10 rounded px-1.5 py-0.5 text-right shadow">
                   <span className="text-[6px] text-slate-400 block uppercase leading-none mb-0.5">Elevasi Air (h)</span>
                   <span className="text-[10px] font-bold text-emerald-400 leading-none">
-                    {currentLevel} cm
+                    {isDeviceOffline ? '-- cm' : `${currentLevel} cm`}
                   </span>
                 </div>
               </div>
@@ -1028,58 +1174,6 @@ export default function SCADADashboard({
             <div className="flex flex-col">
               <span className={themeTextMuted}>Ambang Bahaya:</span>
               <span className="text-rose-500 font-semibold mt-0.5">{thresholdBahaya} cm</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Local Micro-Climate Sensors Panel */}
-        <div id="climate-gauge" className={`${themeCard} rounded-2xl p-6`}>
-          <span className={`text-[10px] font-bold uppercase tracking-[0.25em] ${themeTextMuted} font-mono block mb-5`}>Sensor Fusi Lokal</span>
-          <div className="grid grid-cols-3 gap-3">
-            
-            {/* Local Rain sensor */}
-            <div className={`flex flex-col items-center ${themeBgInner} rounded-xl p-3 text-center`}>
-              <CloudRain className="w-4 h-4 text-[#3B82F6] mb-1.5" />
-              <span className={`text-[9px] ${themeTextMuted} font-sans uppercase tracking-wider`}>Hujan Lokal</span>
-              <span className={`text-xs font-semibold ${isDark ? 'text-white' : 'text-slate-800'} mt-1.5`}>
-                {latestReading ? (
-                  latestReading.local_rain === 0 ? 'Kering' :
-                  latestReading.local_rain === 1 ? 'Ringan' :
-                  latestReading.local_rain === 2 ? 'Sedang' : 'Lebat'
-                ) : 'Kering'}
-              </span>
-              <span className={`text-[8px] ${themeTextMuted} font-mono mt-1`}>FC-37 AO</span>
-            </div>
-
-            {/* Temp sensor */}
-            <div className={`flex flex-col items-center ${themeBgInner} rounded-xl p-3 text-center`}>
-              <Thermometer className="w-4 h-4 text-[#3B82F6] mb-1.5" />
-              <span className={`text-[9px] ${themeTextMuted} font-sans uppercase tracking-wider`}>Suhu</span>
-              <span className={`text-xs font-semibold ${isDark ? 'text-white' : 'text-slate-800'} mt-1.5`}>
-                {latestReading ? `${latestReading.temperature}°C` : '--°C'}
-              </span>
-              <span className={`text-[8px] ${themeTextMuted} font-mono mt-1`}>DHT22 TEMP</span>
-            </div>
-
-            {/* Humidity sensor */}
-            <div className={`flex flex-col items-center ${themeBgInner} rounded-xl p-3 text-center`}>
-              <Percent className="w-4 h-4 text-[#3B82F6] mb-1.5" />
-              <span className={`text-[9px] ${themeTextMuted} font-sans uppercase tracking-wider`}>Humid</span>
-              <span className={`text-xs font-semibold ${isDark ? 'text-white' : 'text-slate-800'} mt-1.5`}>
-                {latestReading ? `${latestReading.humidity}%` : '--%'}
-              </span>
-              <span className={`text-[8px] ${themeTextMuted} font-mono mt-1`}>DHT22 HUMID</span>
-            </div>
-
-          </div>
-
-          {/* Sound Velocity Compensation calculations info */}
-          <div className={`mt-5 p-3.5 ${isDark ? 'bg-black/40 border-white/5' : 'bg-slate-100 border-slate-200'} rounded-xl border flex items-start gap-2.5`}>
-            <Cpu className="w-3.5 h-3.5 text-[#3B82F6] shrink-0 mt-0.5" />
-            <div className={`text-[10px] font-mono ${themeTextSub} leading-relaxed`}>
-              <span className={`font-bold block mb-1 ${isDark ? 'text-white/80' : 'text-slate-700'}`}>KOMPENSASI KECEPATAN SUARA:</span>
-              Vs = 331.3 + 0.606 * T ≈ {latestReading ? (331.3 + 0.606 * latestReading.temperature).toFixed(1) : '343.4'} m/s. <br />
-              Kesalahan kompensasi: ±0.05cm (Otomatis).
             </div>
           </div>
         </div>
@@ -1284,19 +1378,34 @@ export default function SCADADashboard({
               <div className={`flex items-center gap-1 border ${isDark ? 'border-white/5 bg-black/25' : 'border-slate-200 bg-slate-100'} rounded-lg p-0.5 text-[10px] font-mono`}>
                 <button 
                   id="btn-range-realtime"
-                  onClick={() => setChartRange('realtime')}
-                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${chartRange === 'realtime' ? 'bg-[#3B82F6] text-black font-bold' : `${themeTextSub} hover:text-[#3B82F6]`}`}
-                  title="Grafik resolusi tinggi menampilkan 20 pembacaan telemetri sensor ultrasonik terakhir"
+                  onClick={() => {
+                    setUseBatch360Mode(false);
+                    setChartRange('realtime');
+                  }}
+                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${(!useBatch360Mode && chartRange === 'realtime') ? 'bg-[#3B82F6] text-black font-bold' : `${themeTextSub} hover:text-[#3B82F6]`}`}
+                  title="Grafik resolusi tinggi menampilkan 20 pembacaan telemetri terakhir"
                 >
                   Terkini (20 Poin)
                 </button>
                 <button 
                   id="btn-range-24h"
-                  onClick={() => setChartRange('24h')}
-                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${chartRange === '24h' ? 'bg-[#3B82F6] text-black font-bold' : `${themeTextSub} hover:text-[#3B82F6]`}`}
+                  onClick={() => {
+                    setUseBatch360Mode(false);
+                    setChartRange('24h');
+                  }}
+                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${(!useBatch360Mode && chartRange === '24h') ? 'bg-[#3B82F6] text-black font-bold' : `${themeTextSub} hover:text-[#3B82F6]`}`}
                   title="Grafik histori elevasi air akumulatif dari 24 jam terakhir"
                 >
                   Tren 24 Jam
+                </button>
+                <button 
+                  id="btn-range-batch360"
+                  onClick={() => setUseBatch360Mode(!useBatch360Mode)}
+                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer flex items-center gap-1 ${useBatch360Mode ? 'bg-emerald-500 text-black font-bold' : `${themeTextSub} hover:text-emerald-400`}`}
+                  title="Tampilkan visualisasi 360 array sampel kontinu dalam 1 siklus batch ESP32"
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${useBatch360Mode ? 'bg-black' : 'bg-emerald-400 animate-pulse'}`} />
+                  Batch 360 Titik
                 </button>
               </div>
 
@@ -1456,107 +1565,123 @@ export default function SCADADashboard({
 
         </div>
 
-        {/* GEMINI HIGH-THINKING & BMKG NEWS GROUNDING INSIDE THE RIGHT COLUMN (FILLS EMPTY SPACE) */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-2">
-          {/* GEMINI HIGH-THINKING RISK ANALYSIS AND ADVISORY */}
-          <div id="gemini-intelligence-container" className={`${themeCard} rounded-2xl p-6 relative overflow-hidden flex flex-col justify-between`}>
-            <div className="absolute top-0 right-0 w-64 h-64 bg-blue-500/5 rounded-full blur-3xl -mr-20 -mt-20 pointer-events-none" />
-            
-            <div>
-              <div className="flex justify-between items-start mb-5">
-                <div className="flex items-center gap-3">
-                  <div className={`p-2.5 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-100 border-slate-200'} rounded-xl text-[#3B82F6]`}>
-                    <Sparkles className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-800'} leading-tight`}>Penasihat Hidrologi Gemini AI</h3>
-                    <p className={`font-mono text-[9px] uppercase tracking-wider ${themeTextMuted} mt-1`}>gemini-3.1-pro-preview // Thinking: HIGH</p>
-                  </div>
-                </div>
-
-                <button 
-                  id="btn-run-prediction"
-                  onClick={triggerAIEngine}
-                  disabled={aiLoading}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-[#3B82F6] hover:bg-blue-600 disabled:opacity-50 text-black rounded-lg text-xs font-bold transition-all cursor-pointer shadow-sm"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${aiLoading ? 'animate-spin' : ''}`} />
-                  {aiLoading ? 'Menganalisis...' : 'Analisis AI'}
-                </button>
+        {/* SENSOR FUSI LOKAL (Membentang Persegi Panjang Sejajar di Bawah 4 Horizon) */}
+        <div id="climate-gauge" style={{ height: '327.836px' }} className={`${themeCard} rounded-2xl p-6 border ${themeBorder} flex flex-col justify-between`}>
+          {/* Header */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3.5 border-b border-white/5">
+            <div className="flex items-center gap-2.5">
+              <div className={`p-2.5 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-100 border-slate-200'} rounded-xl text-[#3B82F6]`}>
+                <Cpu className="w-5 h-5" />
               </div>
+              <div>
+                <span className={`text-[10px] font-bold uppercase tracking-[0.25em] ${themeTextMuted} font-mono block`}>
+                  Sensor Fusi Lokal & Kompensasi Akustik
+                </span>
+                <span className="text-[9px] font-mono text-slate-400">
+                  Telemetri Mikro-Klimatologi RTU // Koreksi ToF JSN-SR04T Real-time
+                </span>
+              </div>
+            </div>
+            
+            <div className="flex items-center gap-2 font-mono text-[9px]">
+              <span className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full flex items-center gap-1.5 font-bold">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                Koreksi Akustik Aktif
+              </span>
+            </div>
+          </div>
 
-              <div className={`${themeBgInner} rounded-xl p-5 min-h-[180px] text-sm font-sans font-light leading-relaxed ${isDark ? 'text-slate-300' : 'text-slate-700'} relative`}>
-                {aiLoading ? (
-                  <div className={`absolute inset-0 flex flex-col items-center justify-center ${isDark ? 'bg-black/90' : 'bg-slate-100/95'} rounded-xl`}>
-                    <RefreshCw className="w-6 h-6 animate-spin text-[#3B82F6] mb-3" />
-                    <span className={`font-mono ${themeTextMuted} text-xs text-center px-4 uppercase tracking-wider`}>
-                      Mengevaluasi baseline sensor, menyinkronkan data BMKG, <br />
-                      dan menguji regresi sekuensial LSTM via Gemini...
-                    </span>
-                  </div>
-                ) : null}
+          {/* 4 Sensor Cards filling the vertical and horizontal space */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 flex-1 py-3.5">
+            {/* 1. Hujan Lokal */}
+            <div className={`flex flex-col justify-between ${themeBgInner} rounded-xl p-4 border border-white/5 shadow-inner`}>
+              <div className="flex items-center justify-between">
+                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider`}>Hujan Lokal</span>
+                <div className="p-1.5 rounded-lg bg-blue-500/10 text-[#3B82F6]">
+                  <CloudRain className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="my-auto py-2">
+                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight`}>
+                  {latestReading ? (
+                    latestReading.local_rain === 0 ? 'Kering' :
+                    latestReading.local_rain === 1 ? 'Ringan' :
+                    latestReading.local_rain === 2 ? 'Sedang' : 'Lebat'
+                  ) : 'Kering'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[9px] font-mono pt-2 border-t border-white/5 text-slate-400">
+                <span>FC-37 AO</span>
+                <span className={latestReading && latestReading.local_rain > 0 ? 'text-amber-400 font-bold' : 'text-emerald-400 font-semibold'}>
+                  {latestReading && latestReading.local_rain > 0 ? 'PRESIPITASI' : 'NORMAL'}
+                </span>
+              </div>
+            </div>
 
-                {advisory ? (
-                  <div className="space-y-3 whitespace-pre-line leading-relaxed">
-                    {advisory}
-                  </div>
-                ) : (
-                  <div className={`${themeTextMuted} text-center py-12 font-mono text-xs uppercase tracking-wider`}>
-                    Silakan klik tombol "Analisis AI" di atas untuk meminta rekomendasi mitigasi dan interpretasi data mendalam dari Gemini High Thinking.
-                  </div>
-                )}
+            {/* 2. Suhu Udara Lingkungan */}
+            <div className={`flex flex-col justify-between ${themeBgInner} rounded-xl p-4 border border-white/5 shadow-inner`}>
+              <div className="flex items-center justify-between">
+                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider`}>Suhu Ambient</span>
+                <div className="p-1.5 rounded-lg bg-amber-500/10 text-amber-400">
+                  <Thermometer className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="my-auto py-2">
+                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight`}>
+                  {latestReading ? `${latestReading.temperature}°C` : '--°C'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[9px] font-mono pt-2 border-t border-white/5 text-slate-400">
+                <span>DHT22</span>
+                <span className="text-amber-400 font-bold">TERMISTOR NTC</span>
+              </div>
+            </div>
+
+            {/* 3. Kelembaban Udara */}
+            <div className={`flex flex-col justify-between ${themeBgInner} rounded-xl p-4 border border-white/5 shadow-inner`}>
+              <div className="flex items-center justify-between">
+                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider`}>Kelembaban</span>
+                <div className="p-1.5 rounded-lg bg-sky-500/10 text-sky-400">
+                  <Percent className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="my-auto py-2">
+                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight`}>
+                  {latestReading ? `${latestReading.humidity}%` : '--%'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[9px] font-mono pt-2 border-t border-white/5 text-slate-400">
+                <span>DHT22</span>
+                <span className="text-sky-400 font-bold">KAPASITIF RH</span>
+              </div>
+            </div>
+
+            {/* 4. Kompensasi Kecepatan Suara ToF */}
+            <div className={`flex flex-col justify-between ${isDark ? 'bg-black/40 border-white/5' : 'bg-slate-100 border-slate-200'} rounded-xl p-4 border shadow-inner`}>
+              <div className="flex items-center justify-between">
+                <span className={`text-[10px] ${themeTextMuted} font-mono uppercase tracking-wider`}>Kecepatan Suara (Vs)</span>
+                <div className="p-1.5 rounded-lg bg-blue-500/10 text-[#3B82F6]">
+                  <Cpu className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="my-auto py-2">
+                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight`}>
+                  {latestReading ? (331.3 + 0.606 * latestReading.temperature).toFixed(1) : '343.4'} <span className="text-xs font-normal text-slate-400">m/s</span>
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[9px] font-mono pt-2 border-t border-white/5 text-slate-400">
+                <span>JSN-SR04T</span>
+                <span className="text-emerald-400 font-bold tracking-tight">±0.05 cm</span>
               </div>
             </div>
           </div>
 
-          {/* LIVE BMKG NEWS GROUNDING WITH GOOGLE SEARCH */}
-          <div id="news-grounding-container" className={`${themeCard} rounded-2xl p-6 relative overflow-hidden flex flex-col justify-between`}>
-            <div className="absolute top-0 right-0 w-64 h-64 bg-blue-500/5 rounded-full blur-3xl -mr-20 -mt-20 pointer-events-none" />
-            
-            <div>
-              <div className="flex justify-between items-start mb-5">
-                <div className="flex items-center gap-3">
-                  <div className={`p-2.5 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-100 border-slate-200'} rounded-xl text-[#3B82F6]`}>
-                    <Globe className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-800'} leading-tight`}>Live BMKG Grounding Berita</h3>
-                    <p className={`font-mono text-[9px] uppercase tracking-wider ${themeTextMuted} mt-1`}>gemini-3.5-flash // Search Grounded</p>
-                  </div>
-                </div>
-
-                <button 
-                  id="btn-search-news"
-                  onClick={fetchLiveNews}
-                  disabled={searchingNews}
-                  className={`flex items-center gap-1.5 px-4 py-2 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300' : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-700'} border rounded-lg text-xs font-semibold transition-all cursor-pointer`}
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${searchingNews ? 'animate-spin' : ''}`} />
-                  Sync Berita
-                </button>
-              </div>
-
-              <div className={`${themeBgInner} rounded-xl p-5 min-h-[180px] text-sm font-sans font-light leading-relaxed ${isDark ? 'text-slate-300' : 'text-slate-700'} relative`}>
-                {searchingNews ? (
-                  <div className={`absolute inset-0 flex flex-col items-center justify-center ${isDark ? 'bg-black/90' : 'bg-slate-100/95'} rounded-xl`}>
-                    <RefreshCw className="w-6 h-6 animate-spin text-[#3B82F6] mb-3" />
-                    <span className={`font-mono ${themeTextMuted} text-xs text-center px-4 uppercase tracking-wider`}>
-                      Menghubungkan ke Google Search untuk mencari berita bencana dan ketinggian air pintu Manggarai/Katulampa secara real-time...
-                    </span>
-                  </div>
-                ) : null}
-
-                {newsContent ? (
-                  <div className="space-y-3 whitespace-pre-line leading-relaxed">
-                    {newsContent}
-                  </div>
-                ) : (
-                  <div className={`${themeTextMuted} text-center py-12 font-mono text-xs uppercase tracking-wider`}>
-                    Memuat berita banjir Jakarta / Depok secara real-time...
-                  </div>
-                )}
-              </div>
-            </div>
+          {/* Footer formula bar */}
+          <div className={`pt-3 border-t border-white/5 flex flex-col sm:flex-row items-start sm:items-center justify-between text-[9.5px] font-mono ${themeTextMuted} gap-1`}>
+            <span>
+              Formula: <strong className={isDark ? 'text-white/80' : 'text-slate-700'}>Vs = 331.3 + 0.606 × T</strong> m/s
+            </span>
+            <span>Mengoreksi deviasi gelombang ultrasonik JSN-SR04T secara kontinu</span>
           </div>
         </div>
 
