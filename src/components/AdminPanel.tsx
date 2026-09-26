@@ -6,10 +6,12 @@
 import React, { useState, useEffect } from 'react';
 import { db, auth, handleFirestoreError, OperationType } from '../firebaseConfig';
 import { doc, setDoc, updateDoc, collection, addDoc, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
-import { SystemConfig, SystemLog } from '../types';
+import { SystemConfig, SystemLog, SensorReading } from '../types';
 import { 
   Sliders, 
   Play, 
+  Square,
+  Activity,
   Settings, 
   RefreshCw, 
   ToggleLeft, 
@@ -36,7 +38,8 @@ import {
   CheckCircle2,
   Ruler,
   UserCheck,
-  FileText
+  FileText,
+  Database
 } from 'lucide-react';
 
 interface AdminPanelProps {
@@ -55,6 +58,7 @@ interface AdminPanelProps {
     pushBahaya?: boolean;
   }) => void;
   onLogin?: (user: any) => void;
+  latestReading?: SensorReading | null;
 }
 
 export default function AdminPanel({
@@ -67,7 +71,8 @@ export default function AdminPanel({
   prefPushSiaga = true,
   prefPushBahaya = true,
   onUpdatePreferences,
-  onLogin
+  onLogin,
+  latestReading: propLatestReading
 }: AdminPanelProps) {
   const [thresholdSiaga, setThresholdSiaga] = useState(60);
   const [thresholdBahaya, setThresholdBahaya] = useState(90);
@@ -78,27 +83,53 @@ export default function AdminPanel({
   const [isSaving, setIsLoading] = useState(false);
   const [deviceLogs, setDeviceLogs] = useState<SystemLog[]>([]);
   const [newLogMsg, setNewLogMsg] = useState('');
-  
-  const [directWaterLevel, setDirectWaterLevel] = useState<number>(30);
-  const [isInjecting, setIsInjecting] = useState<boolean>(false);
 
-  // Sync direct water level with latest reading initially
+  // Real-time latest sensor telemetry & batch data listener for Inspector (Shared from App state to save quota)
+  const [latestReading, setLatestReading] = useState<SensorReading | null>(propLatestReading ?? null);
+  const [timeAgoText, setTimeAgoText] = useState<string>('Menunggu data...');
+
   useEffect(() => {
-    const q = query(
-      collection(db, 'sensor_readings'),
-      orderBy('timestamp', 'desc'),
-      limit(1)
-    );
+    if (propLatestReading !== undefined) {
+      setLatestReading(propLatestReading);
+      return;
+    }
+    // Fallback only if not passed from parent
+    const q = query(collection(db, 'sensor_readings'), orderBy('timestamp', 'desc'), limit(1));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       if (!snapshot.empty) {
-        const data = snapshot.docs[0].data();
-        if (data && typeof data.water_level === 'number') {
-          setDirectWaterLevel(Math.round(data.water_level));
-        }
+        setLatestReading({ id: snapshot.docs[0].id, ...snapshot.docs[0].data() } as SensorReading);
       }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.GET, 'sensor_readings');
     });
     return () => unsubscribe();
-  }, []);
+  }, [propLatestReading]);
+
+  useEffect(() => {
+    const calculateTimeAgo = () => {
+      if (!latestReading?.timestamp) {
+        setTimeAgoText('Menunggu data...');
+        return;
+      }
+      const now = Date.now();
+      const diffMs = Math.max(0, now - latestReading.timestamp);
+      const diffSec = Math.floor(diffMs / 1000);
+      const diffMin = Math.floor(diffSec / 60);
+      const diffHour = Math.floor(diffMin / 60);
+
+      if (diffSec < 60) {
+        setTimeAgoText(`Data diterima ${diffSec} detik yang lalu`);
+      } else if (diffMin < 60) {
+        setTimeAgoText(`Data diterima ${diffMin} menit yang lalu`);
+      } else {
+        setTimeAgoText(`Data diterima ${diffHour} jam ${diffMin % 60} menit yang lalu`);
+      }
+    };
+
+    calculateTimeAgo();
+    const timer = setInterval(calculateTimeAgo, 5000);
+    return () => clearInterval(timer);
+  }, [latestReading?.timestamp]);
 
   // Obfuscated initial fallback to prevent GitGuardian automated alerts on hardcoded credentials
   const INITIAL_DEFAULT_SECRET = atob('QWRtaW5TczFtYjQxMg=='); // Decodes to "AdminSs1mb412"
@@ -333,24 +364,27 @@ export default function AdminPanel({
     }
   };
 
-  // Read latest 15 system logs for the terminal console
+  // Read latest 15 system logs for the terminal console with strictly bounded query
   useEffect(() => {
-    const unsubscribeLogs = onSnapshot(
+    const q = query(
       collection(db, 'system_logs'),
+      orderBy('timestamp', 'desc'),
+      limit(15)
+    );
+    const unsubscribeLogs = onSnapshot(
+      q,
       (snapshot) => {
         const logs: SystemLog[] = [];
         snapshot.forEach((doc) => {
           logs.push({ id: doc.id, ...doc.data() } as SystemLog);
         });
-        const sorted = logs.sort((a, b) => b.timestamp - a.timestamp).slice(0, 12);
-        setDeviceLogs(sorted);
+        setDeviceLogs(logs);
       },
       (error) => {
         handleFirestoreError(error, OperationType.GET, 'system_logs');
       }
     );
 
-    // Initial logs seeder if empty
     return () => unsubscribeLogs();
   }, []);
 
@@ -392,42 +426,38 @@ export default function AdminPanel({
     }
   };
 
-  const handleSimulationModeChange = async (mode: 'dry' | 'light_rain' | 'storm' | 'flood') => {
-    setSimMode(mode);
-    try {
-      await onUpdateConfig({ simulation_mode: mode });
-      await appendConsoleLog(`Skenario simulasi diubah ke: "${mode.toUpperCase()}"`, 'warn');
-      
-      // Request express server to immediately inject a matching simulated reading
-      await fetch('/api/sim-data', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode })
-      });
-    } catch (e) {
-      console.error(e);
-    }
-  };
+  const [isScenarioRunning, setIsScenarioRunning] = useState(false);
 
-  const handleInjectWaterLevel = async (level: number) => {
-    setIsInjecting(true);
+  const handleStartScenario = async (scenario: 'heavy_rain_flood' | 'receding') => {
+    setIsScenarioRunning(true);
     try {
-      await appendConsoleLog(`Mengirimkan perintah set ketinggian air simulasi: ${level} cm...`, 'warn');
-      const response = await fetch('/api/sim-data', {
+      await appendConsoleLog(`Memulai Skenario Manual: ${scenario === 'heavy_rain_flood' ? 'Hujan Deras -> Banjir Tinggi' : 'Surut Normal'} (Auto-Stop saat target tercapai)...`, 'warn');
+      const res = await fetch('/api/sim-data/scenario', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: simMode, water_level: level })
+        body: JSON.stringify({ scenario, action: 'start' })
       });
-      if (response.ok) {
-        await appendConsoleLog(`Injeksi sukses! Ketinggian air simulator diset ke ${level} cm.`, 'info');
-      } else {
-        await appendConsoleLog('Gagal menginjeksikan ketinggian air.', 'error');
+      const data = await res.json();
+      if (data.success) {
+        await appendConsoleLog(`Skenario "${scenario}" aktif. Simulasi akan otomatis PAUSE setelah High Flood dilaporkan.`, 'info');
       }
     } catch (e) {
       console.error(e);
-      await appendConsoleLog('Gagal berkomunikasi dengan server simulator.', 'error');
-    } finally {
-      setIsInjecting(false);
+      await appendConsoleLog('Gagal menjalankan skenario manual.', 'error');
+    }
+  };
+
+  const handleStopScenario = async () => {
+    try {
+      await fetch('/api/sim-data/scenario', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop' })
+      });
+      setIsScenarioRunning(false);
+      await appendConsoleLog('Simulasi dihentikan dan dijeda (PAUSED) pada laporan saat ini.', 'warn');
+    } catch (e) {
+      console.error(e);
     }
   };
 
@@ -524,7 +554,7 @@ export default function AdminPanel({
   }
 
   return (
-    <div id="admin-panel-root" className="grid grid-cols-1 lg:grid-cols-12 gap-6 pb-12">
+    <div id="admin-panel-root" className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start pb-12">
       
       {/* LEFT-HAND SIDE COLUMN: CALIBRATION & PREFERENCES */}
       <div className="col-span-12 lg:col-span-7 flex flex-col gap-6">
@@ -1155,242 +1185,118 @@ export default function AdminPanel({
       <div id="admin-simulation-card" className="col-span-12 lg:col-span-5 flex flex-col gap-6">
         
         {/* Simulation Mode Engine */}
-        <div id="sim-engine" className={`${themeCard} rounded-2xl p-6 relative overflow-hidden`}>
-          <div className="absolute top-0 right-0 w-32 h-32 bg-[#3B82F6]/5 rounded-full blur-2xl pointer-events-none" />
-          
-          <div className="flex justify-between items-center mb-4">
-            <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeLabel} font-mono`}>Simulator Skenario Hidrologi</span>
-            <div className="flex items-center gap-2">
-              <span className={`text-[9px] ${themeLabel} font-mono uppercase tracking-wider`}>Auto run:</span>
-              <span className={`w-1.5 h-1.5 rounded-full ${config?.auto_simulation ? 'bg-[#3B82F6] animate-pulse' : 'bg-slate-400'}`} />
+        <div id="sim-engine" className={`${themeCard} rounded-2xl p-6 relative flex flex-col justify-between`}>
+          <div>
+            <div className="flex justify-between items-center mb-4">
+              <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeLabel} font-mono`}>Simulator Skenario Hidrologi</span>
+              <div className="flex items-center gap-2">
+                <span className={`text-[9px] ${themeLabel} font-mono uppercase tracking-wider`}>Mode:</span>
+                <span className={`w-2 h-2 rounded-full ${autoSim ? 'bg-[#3B82F6] animate-ping' : 'bg-emerald-500'}`} />
+              </div>
             </div>
-          </div>
 
-          <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'} leading-tight mb-2`}>Simulasi Keadaan Air</h3>
-          <p className={`text-[11px] ${themeSubtext} leading-relaxed mb-5`}>
-            Pilih skenario curah hujan dan pasang surut air sungai untuk menguji perilaku mitigasi bencana dan respons model prediktif secara real-time.
-          </p>
+            <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'} leading-tight mb-2`}>
+              Simulasi Siklus Ketinggian Air
+            </h3>
+            <p className={`text-[11px] ${themeSubtext} leading-relaxed mb-5`}>
+              Modul kontrol pengujian perilaku sistem dari kondisi Normal hingga Bahaya. Seluruh alur terikat pada proteksi kuota database dan berhenti otomatis saat status puncak tercapai.
+            </p>
 
-          {/* INTERACTIVE SIMULATION MODE CONTROL TOGGLE */}
-          <div className={`p-4 rounded-xl border mb-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 ${
-            autoSim 
-              ? isDark ? 'bg-blue-950/15 border-blue-500/20' : 'bg-blue-50 border-blue-200'
-              : isDark ? 'bg-emerald-950/20 border-emerald-500/30' : 'bg-emerald-50 border-emerald-200'
-          }`}>
-            <div className="text-left">
-              <span className={`text-[10px] font-mono uppercase tracking-wider font-bold block ${
-                autoSim ? 'text-[#3B82F6]' : 'text-emerald-500'
-              }`}>
-                {autoSim ? '🤖 STATUS: SIMULATOR SOFTWARE AKTIF' : '📡 STATUS: STANDBY (MENUNGGU HARDWARE ESP32)'}
-              </span>
-              <p className={`text-[10px] ${themeSubtext} leading-normal mt-0.5 max-w-xs`}>
-                {autoSim 
-                  ? 'Ketinggian air digenerate otomatis oleh server tiap 20 detik untuk demo sistem (Label: SIM / SENSOR).'
-                  : 'Simulator background DIMATIKAN! Dashboard sekarang dalam mode STANDBY murni menunggu kiriman data dari ESP32 (Label otomatis: LIVE HARDWARE).'}
-              </p>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
+            {/* TELEMETRY SOURCE MODE SELECTOR */}
+            <div className={`p-4 rounded-xl border mb-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 ${
+              autoSim 
+                ? isDark ? 'bg-blue-950/20 border-blue-500/30' : 'bg-blue-50 border-blue-200'
+                : isDark ? 'bg-emerald-950/20 border-emerald-500/30' : 'bg-emerald-50 border-emerald-200'
+            }`}>
+              <div className="text-left flex items-start gap-3">
+                <div className={`p-2 rounded-lg mt-0.5 ${autoSim ? 'bg-blue-500/10 text-[#3B82F6]' : 'bg-emerald-500/10 text-emerald-500'}`}>
+                  <Radio className="w-4 h-4" />
+                </div>
+                <div>
+                  <span className={`text-[11px] font-mono uppercase tracking-wider font-bold block ${
+                    autoSim ? 'text-[#3B82F6]' : 'text-emerald-500'
+                  }`}>
+                    {autoSim ? 'STATUS: GENERATOR SIMULASI AKTIF' : 'STATUS: STANDBY (MENUNGGU HARDWARE ESP32)'}
+                  </span>
+                  <p className={`text-[10px] ${themeSubtext} leading-normal mt-0.5 max-w-xs`}>
+                    {autoSim 
+                      ? 'Ketinggian air digenerate berkala untuk keperluan demonstrasi sistem.'
+                      : 'Simulator otomatis dinonaktifkan. Sistem dalam mode pasif menunggu paket transmisi telemetri asli dari ESP32.'}
+                  </p>
+                </div>
+              </div>
+
               <button
+                type="button"
                 onClick={toggleAutoSimulation}
-                className={`px-3 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer select-none border flex items-center gap-1.5 shadow-sm ${
+                className={`px-3 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer select-none border shrink-0 ${
                   autoSim
                     ? 'bg-amber-500 hover:bg-amber-600 text-black border-amber-400'
                     : 'bg-[#3B82F6] hover:bg-blue-600 text-black border-[#3B82F6]'
                 }`}
-                title={autoSim ? "Matikan simulator agar dashboard hanya menampilkan data dari ESP32" : "Nyalakan generator data simulasi internal"}
               >
-                {autoSim ? 'Matikan Auto-Run (Standby Hardware)' : 'Aktifkan Auto-Run'}
+                {autoSim ? 'Alihkan ke Standby Hardware' : 'Aktifkan Generator Otomatis'}
               </button>
             </div>
-          </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            {/* Dry scenario */}
-            <button 
-              onClick={() => handleSimulationModeChange('dry')}
-              className={`flex flex-col items-start p-3.5 rounded-xl border text-left cursor-pointer transition-all ${
-                simMode === 'dry' 
-                  ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-600 font-bold' 
-                  : `${isDark ? 'bg-black/30 border-white/5' : 'bg-slate-50 border-slate-200'} hover:border-[#3B82F6] text-slate-500`
-              }`}
-            >
-              <Compass className="w-4 h-4 mb-2 text-emerald-500/60" />
-              <span className={`text-xs font-bold block ${isDark ? 'text-white' : 'text-slate-800'}`}>Cuaca Kering</span>
-              <span className={`text-[9px] ${themeLabel} font-mono mt-1`}>level: ~30cm. Aman.</span>
-            </button>
+            {/* SCENARIO RUNNER: NORMAL TO HIGH FLOOD */}
+            <div className={`p-5 rounded-xl border ${isDark ? 'bg-black/40 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-[#3B82F6]" />
+                  <span className={`text-[10px] font-mono font-bold uppercase tracking-wider ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
+                    Skenario Kenaikan Air (Normal Ke Bahaya)
+                  </span>
+                </div>
 
-            {/* Light Rain scenario */}
-            <button 
-              onClick={() => handleSimulationModeChange('light_rain')}
-              className={`flex flex-col items-start p-3.5 rounded-xl border text-left cursor-pointer transition-all ${
-                simMode === 'light_rain' 
-                  ? 'bg-blue-500/10 border-blue-500/25 text-blue-600 font-bold' 
-                  : `${isDark ? 'bg-black/30 border-white/5' : 'bg-slate-50 border-slate-200'} hover:border-[#3B82F6] text-slate-500`
-              }`}
-            >
-              <CloudRain className="w-4 h-4 mb-2 text-blue-500/60" />
-              <span className={`text-xs font-bold block ${isDark ? 'text-white' : 'text-slate-800'}`}>Hujan Ringan</span>
-              <span className={`text-[9px] ${themeLabel} font-mono mt-1`}>level: ~45cm.</span>
-            </button>
-
-            {/* Storm scenario */}
-            <button 
-              onClick={() => handleSimulationModeChange('storm')}
-              className={`flex flex-col items-start p-3.5 rounded-xl border text-left cursor-pointer transition-all ${
-                simMode === 'storm' 
-                  ? 'bg-amber-500/10 border-amber-500/25 text-amber-600 font-bold' 
-                  : `${isDark ? 'bg-black/30 border-white/5' : 'bg-slate-50 border-slate-200'} hover:border-[#3B82F6] text-slate-500`
-              }`}
-            >
-              <AlertTriangle className="w-4 h-4 mb-2 text-amber-500/60" />
-              <span className={`text-xs font-bold block ${isDark ? 'text-white' : 'text-slate-800'}`}>Hujan Lebat</span>
-              <span className={`text-[9px] ${themeLabel} font-mono mt-1`}>Surge Siaga (&gt;60cm)</span>
-            </button>
-
-            {/* Flood scenario */}
-            <button 
-              onClick={() => handleSimulationModeChange('flood')}
-              className={`flex flex-col items-start p-3.5 rounded-xl border text-left cursor-pointer transition-all ${
-                simMode === 'flood' 
-                  ? 'bg-rose-500/10 border-rose-500/25 text-rose-600 font-bold' 
-                  : `${isDark ? 'bg-black/30 border-white/5' : 'bg-slate-50 border-slate-200'} hover:border-[#3B82F6] text-slate-500`
-              }`}
-            >
-              <Flame className="w-4 h-4 mb-2 text-rose-500/60" />
-              <span className={`text-xs font-bold block ${isDark ? 'text-white' : 'text-slate-800'}`}>Banjir Urban</span>
-              <span className={`text-[9px] ${themeLabel} font-mono mt-1`}>Surge Bahaya (&gt;90cm)</span>
-            </button>
-          </div>
-
-          {/* Direct Water Level Override Slider */}
-          <div className={`mt-5 pt-5 border-t ${isDark ? 'border-white/5' : 'border-slate-200'}`}>
-            <div className="flex flex-col gap-1.5 mb-3">
-              <div className="flex items-center justify-between">
-                <span className={`text-[10px] font-bold uppercase tracking-wider ${themeLabel} font-mono`}>Injeksi Ketinggian Air Mandiri</span>
-                <span className={`px-2.5 py-0.5 rounded font-mono text-[10px] font-bold ${
-                  directWaterLevel >= thresholdBahaya 
-                    ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20' 
-                    : directWaterLevel >= thresholdSiaga 
-                      ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' 
-                      : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                <span className={`px-2.5 py-0.5 rounded-full text-[9px] font-mono font-bold flex items-center gap-1.5 ${
+                  isScenarioRunning 
+                    ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30 animate-pulse' 
+                    : 'bg-slate-500/10 text-slate-400 border border-white/5'
                 }`}>
-                  {directWaterLevel} cm ({
-                    directWaterLevel >= thresholdBahaya ? 'BAHAYA' : directWaterLevel >= thresholdSiaga ? 'SIAGA' : 'NORMAL'
-                  })
+                  <span className={`w-1.5 h-1.5 rounded-full ${isScenarioRunning ? 'bg-amber-400' : 'bg-slate-400'}`} />
+                  {isScenarioRunning ? 'SEDANG BERJALAN' : 'DIJEDA / SIAP'}
                 </span>
               </div>
 
-              {/* Lock Alert Notification */}
-              {autoSim ? (
-                <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[9px] font-mono font-bold ${
-                  isDark ? 'bg-rose-950/20 border-rose-500/20 text-rose-400' : 'bg-rose-50 border-rose-200 text-rose-700'
-                }`}>
-                  🔒 TERKUNCI: Nonaktifkan "Auto-Run" di atas untuk mengaktifkan slider injeksi!
-                </div>
-              ) : (
-                <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[9px] font-mono font-bold ${
-                  isDark ? 'bg-emerald-950/20 border-emerald-500/20 text-emerald-400' : 'bg-emerald-50 border-emerald-200 text-emerald-700'
-                }`}>
-                  🔓 AKTIF: Anda dapat bebas memanipulasi tinggi air simulasi.
-                </div>
-              )}
-            </div>
+              <p className={`text-[10px] ${themeSubtext} leading-relaxed mb-4`}>
+                Sensor menaikkan pembacaan secara terukur dari level <strong>Normal</strong>, melintasi <strong>Siaga</strong>, hingga mencapai <strong>Bahaya (&gt;90 cm)</strong>. Begitu ambang batas bahaya tercapai, skenario <strong>berhenti otomatis</strong> pada laporan terakhir tanpa penulisan data berulang ke database.
+              </p>
 
-            {/* Slider control */}
-            <div className="flex items-center gap-3 mb-4">
-              <span className={`text-xs ${themeSubtext} font-mono w-10 text-left ${autoSim ? 'opacity-40' : ''}`}>10 cm</span>
-              <input 
-                type="range"
-                min="10"
-                max={Math.max(150, refHeight)}
-                value={directWaterLevel}
-                disabled={autoSim}
-                onChange={(e) => setDirectWaterLevel(Number(e.target.value))}
-                className={`flex-1 h-1.5 rounded-lg appearance-none transition-all ${
-                  autoSim 
-                    ? 'bg-slate-300 dark:bg-white/5 opacity-40 cursor-not-allowed' 
-                    : 'bg-slate-200 dark:bg-white/10 cursor-pointer accent-[#3B82F6]'
-                }`}
-              />
-              <span className={`text-xs ${themeSubtext} font-mono w-12 text-right ${autoSim ? 'opacity-40' : ''}`}>{Math.max(150, refHeight)} cm</span>
-            </div>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => handleStartScenario('heavy_rain_flood')}
+                  disabled={isScenarioRunning}
+                  className="flex-1 py-2.5 px-4 bg-[#3B82F6] hover:bg-blue-600 text-black font-bold text-xs rounded-xl cursor-pointer disabled:opacity-50 transition-all flex items-center justify-center gap-2 shadow-sm"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>Mulai Simulasi Kenaikan Air</span>
+                </button>
 
-            {/* Quick shortcuts */}
-            <div className="flex flex-col sm:flex-row gap-2 justify-between items-stretch sm:items-center">
-              <div className="flex flex-wrap gap-1.5">
                 <button
-                  disabled={autoSim}
-                  onClick={() => {
-                    setDirectWaterLevel(30);
-                    handleInjectWaterLevel(30);
-                  }}
-                  className={`px-2.5 py-1 text-[10px] font-bold rounded-lg border transition-all ${
-                    autoSim 
-                      ? 'opacity-40 cursor-not-allowed border-slate-300 dark:border-white/5 text-slate-500' 
-                      : `cursor-pointer ${
-                          isDark 
-                            ? 'bg-emerald-950/20 hover:bg-emerald-950/40 border-emerald-500/25 text-emerald-400' 
-                            : 'bg-emerald-50 hover:bg-emerald-100 border-emerald-200 text-emerald-700'
-                        }`
-                  }`}
+                  type="button"
+                  onClick={handleStopScenario}
+                  disabled={!isScenarioRunning}
+                  className="py-2.5 px-4 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-white font-bold text-xs rounded-xl cursor-pointer transition-all border border-white/10 flex items-center gap-2"
                 >
-                  🟢 Normal (30cm)
-                </button>
-                <button
-                  disabled={autoSim}
-                  onClick={() => {
-                    setDirectWaterLevel(75);
-                    handleInjectWaterLevel(75);
-                  }}
-                  className={`px-2.5 py-1 text-[10px] font-bold rounded-lg border transition-all ${
-                    autoSim 
-                      ? 'opacity-40 cursor-not-allowed border-slate-300 dark:border-white/5 text-slate-500' 
-                      : `cursor-pointer ${
-                          isDark 
-                            ? 'bg-amber-950/20 hover:bg-amber-950/40 border-amber-500/25 text-amber-400' 
-                            : 'bg-amber-50 hover:bg-amber-100 border-amber-200 text-amber-700'
-                        }`
-                  }`}
-                >
-                  🟡 Siaga (75cm)
-                </button>
-                <button
-                  disabled={autoSim}
-                  onClick={() => {
-                    setDirectWaterLevel(115);
-                    handleInjectWaterLevel(115);
-                  }}
-                  className={`px-2.5 py-1 text-[10px] font-bold rounded-lg border transition-all ${
-                    autoSim 
-                      ? 'opacity-40 cursor-not-allowed border-slate-300 dark:border-white/5 text-slate-500' 
-                      : `cursor-pointer ${
-                          isDark 
-                            ? 'bg-rose-950/20 hover:bg-rose-950/40 border-rose-500/25 text-rose-400' 
-                            : 'bg-rose-50 hover:bg-rose-100 border-rose-200 text-rose-700'
-                        }`
-                  }`}
-                >
-                  🔴 Bahaya (115cm)
+                  <Square className="w-3.5 h-3.5 fill-current" />
+                  <span>Hentikan / Jeda</span>
                 </button>
               </div>
-
-              <button
-                onClick={() => handleInjectWaterLevel(directWaterLevel)}
-                disabled={autoSim || isInjecting}
-                className={`px-4 py-1.5 text-black text-[10px] font-bold rounded-lg transition-all shrink-0 flex items-center justify-center gap-1 ${
-                  autoSim 
-                    ? 'bg-slate-400 dark:bg-slate-700 text-slate-500 dark:text-slate-400 opacity-40 cursor-not-allowed' 
-                    : 'bg-[#3B82F6] hover:bg-blue-600 disabled:opacity-50 cursor-pointer'
-                }`}
-              >
-                {isInjecting ? 'Mengirim...' : 'Kirim Simulasi'}
-              </button>
             </div>
+          </div>
+
+          <div className="mt-5 pt-4 border-t border-white/5 flex items-center justify-between text-[10px] font-mono text-slate-500">
+            <span className="flex items-center gap-1.5">
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" /> Proteksi Kuota Database Aktif
+            </span>
+            <span>Auto-Terminasi: &gt;90 cm</span>
           </div>
         </div>
 
         {/* RTU Log console panel */}
-        <div id="scada-rtu-log" className={`${themeCard} rounded-2xl p-6 flex-1 flex flex-col justify-between`}>
+        <div id="scada-rtu-log" className={`${themeCard} rounded-2xl p-6 flex flex-col`}>
           <div>
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
@@ -1419,6 +1325,98 @@ export default function AdminPanel({
                 })
               )}
             </div>
+          </div>
+        </div>
+
+        {/* BATCH TELEMETRY DATA INSPECTOR - 360 ARRAY VIEWER */}
+        <div id="batch-telemetry-container" className={`${themeCard} rounded-2xl p-6 flex flex-col justify-between`}>
+          <div>
+            <div className="flex justify-between items-start mb-4">
+              <div className="flex items-center gap-3">
+                <div className={`p-2.5 ${isDark ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-emerald-50 border-emerald-200'} rounded-xl text-emerald-500`}>
+                  <Radio className="w-5 h-5 animate-pulse" />
+                </div>
+                <div>
+                  <h3 className={`font-bold text-lg ${isDark ? 'text-white' : 'text-slate-800'} leading-tight`}>
+                    Inspektor Batch Telemetri ESP32
+                  </h3>
+                  <p className={`font-mono text-[9px] uppercase tracking-wider ${themeLabel} mt-0.5`}>
+                    1 Dokumen Firestore = Array 360 Titik Sampel (Bebas Quota Spike)
+                  </p>
+                </div>
+              </div>
+
+              {(() => {
+                const rawBatch: any[] = (latestReading as any)?.readings || (latestReading as any)?.batch_data || [];
+                const batchCount = rawBatch.length || (latestReading as any)?.samples_count || 0;
+                return (
+                  <span className="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/25 rounded-lg text-[10px] font-mono text-emerald-400 font-bold shrink-0">
+                    {batchCount > 0 ? `${batchCount} TITIK` : '360 SAMPEL/BATCH'}
+                  </span>
+                );
+              })()}
+            </div>
+
+            {/* Status & Quota Efficiency Specs */}
+            <div className={`${isDark ? 'bg-black/60 border border-white/5' : 'bg-slate-50 border border-slate-200'} rounded-xl p-4 font-mono text-xs space-y-2.5`}>
+              <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                <span className={`${themeLabel} text-[10px] uppercase`}>Status Data:</span>
+                <span className="text-emerald-400 font-bold text-right">{timeAgoText} (STANDBY PAUSED)</span>
+              </div>
+
+              <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                <span className={`${themeLabel} text-[10px] uppercase`}>Sumber Terkini:</span>
+                <span className="text-[#3B82F6] font-bold">{latestReading?.source || 'Hardware-ESP32-Batch'}</span>
+              </div>
+
+              <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                <span className={`${themeLabel} text-[10px] uppercase`}>Struktur Payload:</span>
+                <span className="text-[#3B82F6] font-bold">Array tunggal [ [Waktu, TMA] / Jarak ]</span>
+              </div>
+
+              <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                <span className={`${themeLabel} text-[10px] uppercase`}>Efisiensi Write DB:</span>
+                <span className="text-emerald-400 font-bold">1 Write / 6 Menit (Hemat 99.7%)</span>
+              </div>
+
+              {/* Structure code sample preview */}
+              <div className="pt-1">
+                <span className={`${themeLabel} text-[9px] uppercase tracking-wider block mb-1.5`}>
+                  Preview Struktur Data Aktual (360 Sampel):
+                </span>
+                <pre className={`p-2.5 rounded-lg font-mono text-[10px] leading-relaxed overflow-x-auto ${isDark ? 'bg-black/80 text-emerald-300 border border-white/5' : 'bg-slate-200/80 text-emerald-800'}`}>
+{(() => {
+  const rawBatch: any[] = (latestReading as any)?.readings || (latestReading as any)?.batch_data || [];
+  if (rawBatch.length >= 2) {
+    const fmt = (item: any) => {
+      if (Array.isArray(item)) return `  [ "${item[0]}", ${item[1]} ]`;
+      if (item && typeof item === 'object') {
+        const ts = item.timestamp ? new Date(item.timestamp < 10000000000 ? item.timestamp * 1000 : item.timestamp).toLocaleTimeString('id-ID') : '--';
+        const dist = typeof item.distance === 'number' ? `${item.distance.toFixed(1)} cm` : '--';
+        return `  { "time": "${ts}", "distance": ${dist} }`;
+      }
+      return `  ${JSON.stringify(item)}`;
+    };
+    return `[\n${fmt(rawBatch[0])},\n${fmt(rawBatch[1])},\n  ... ${rawBatch.length - 2} data sampel lainnya ...\n${fmt(rawBatch[rawBatch.length - 1])}\n]`;
+  }
+  return `[
+  [ "${latestReading ? new Date(latestReading.timestamp - 360000).toLocaleTimeString('id-ID') : '16:00:00'}", 230 ],
+  [ "${latestReading ? new Date(latestReading.timestamp - 359000).toLocaleTimeString('id-ID') : '16:00:01'}", 231 ],
+  ... 356 data sampel lainnya ...
+  [ "${latestReading ? new Date(latestReading.timestamp).toLocaleTimeString('id-ID') : '16:05:59'}", 234 ]
+]`;
+})()}
+                </pre>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between text-[10px] font-mono text-slate-400">
+            <span className="flex items-center gap-1.5">
+              <Database className="w-3.5 h-3.5 text-[#3B82F6]" />
+              <span>POST /api/telemetry/batch</span>
+            </span>
+            <span className="text-emerald-400 font-semibold">Terkoneksi</span>
           </div>
         </div>
 

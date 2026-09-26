@@ -16,7 +16,8 @@ export interface SensorReading {
   distance?: number; // raw ultrasonic distance in cm (jarak sensor ke air)
   source?: 'Hardware-ESP32' | 'Hardware-ESP32-Batch' | 'Simulator-Engine' | 'Manual-Peil-Schaal' | string;
   samples_count?: number; // count of raw ultrasonic samples in batch (e.g. 360 samples)
-  batch_data?: Array<[string | number, number]>; // Array 360 sampel: [[timestamp, water_level], ...]
+  batch_data?: Array<[string | number, number]> | Array<{ timestamp: number; distance: number; [key: string]: any }>; // Array 360 sampel
+  readings?: Array<{ timestamp: number; distance: number; [key: string]: any }> | Array<[string | number, number]>; // Array 360 sampel dari ESP32
   notes?: string; // Catatan lapangan khusus (misal jika sensor error atau observasi visual)
   operator?: string; // Nama petugas penginput data manual
 }

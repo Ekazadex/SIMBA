@@ -94,7 +94,8 @@ export default function SCADADashboard({
   prefSoundBahaya = true,
   prefPushSiaga = true,
   prefPushBahaya = true,
-  onNavigateTab
+  onNavigateTab,
+  onLatestReadingChange
 }: {
   config: SystemConfig | null;
   theme?: 'light' | 'dark';
@@ -103,6 +104,7 @@ export default function SCADADashboard({
   prefPushSiaga?: boolean;
   prefPushBahaya?: boolean;
   onNavigateTab?: (tab: 'dashboard' | 'admin') => void;
+  onLatestReadingChange?: (reading: SensorReading | null) => void;
 }) {
   const [readingsList, setReadingsList] = useState<SensorReading[]>([]);
   const [latestReading, setLatestReading] = useState<SensorReading | null>(null);
@@ -317,9 +319,9 @@ export default function SCADADashboard({
 
   // Bind real-time Firestore listeners for readings, predictions, BMKG data and config
   useEffect(() => {
-    // 1. Listen for recent sensor readings (last 40 documents for low quota footprint)
+    // 1. Listen for recent sensor readings (last 20 documents for ultra-low quota footprint)
     const unsubscribeReadings = onSnapshot(
-      getFirestoreQuery('sensor_readings', 40),
+      getFirestoreQuery('sensor_readings', 20),
       (snapshot) => {
         const data: SensorReading[] = [];
         snapshot.forEach((doc) => {
@@ -335,7 +337,11 @@ export default function SCADADashboard({
         const sorted = data.sort((a, b) => a.timestamp - b.timestamp);
         setReadingsList(sorted);
         if (sorted.length > 0) {
-          setLatestReading(sorted[sorted.length - 1]);
+          const newest = sorted[sorted.length - 1];
+          setLatestReading(newest);
+          onLatestReadingChange?.(newest);
+        } else {
+          onLatestReadingChange?.(null);
         }
       },
       (error) => {
@@ -808,40 +814,88 @@ export default function SCADADashboard({
     document.body.removeChild(link);
   };
 
-  // Prepares the multi-series charting data combining actual readings and predictions
-  const hasBatchData = Boolean(latestReading?.batch_data && latestReading.batch_data.length > 0);
+  // Extract raw batch array from either 'readings' (ESP32 direct) or 'batch_data'
+  const rawBatch: any[] = (latestReading as any)?.readings || (latestReading as any)?.batch_data || [];
+  const hasBatchData = Boolean(Array.isArray(rawBatch) && rawBatch.length > 0);
   const activeReadings = chartRange === 'realtime' ? readingsList.slice(-20) : readingsList;
   const refHeight = config?.reference_height || 300;
-  
+
+  // Despiking helper: detects isolated single-reading spikes caused by ultrasonic acoustic reflections
+  const cleanReadings = activeReadings.map((r, i, arr) => {
+    let elev = r.water_level;
+    const ultrasonicDistance = typeof r.distance === 'number' 
+      ? r.distance 
+      : Math.max(0, Math.round((refHeight - r.water_level) * 10) / 10);
+
+    // Automatic signal conditioning: filter out isolated obstacle spikes (e.g. 109cm/195cm reflections)
+    // when neighboring data points are consistent, keeping the hydrograph true to physical reality
+    if (arr.length >= 3) {
+      const prev = i > 0 ? arr[i - 1].water_level : arr[i + 1]?.water_level ?? elev;
+      const next = i < arr.length - 1 ? arr[i + 1].water_level : arr[i - 1]?.water_level ?? elev;
+      const avgNeighbor = (prev + next) / 2;
+      // If point jumps by > 40cm above neighbors while neighbors are close to each other
+      if (Math.abs(prev - next) < 30 && (elev - avgNeighbor) > 40) {
+        elev = Math.round(avgNeighbor * 10) / 10;
+      }
+    }
+
+    const formattedTime = new Date(r.timestamp).toLocaleTimeString('id-ID', {
+      hour: '2-digit',
+      minute: '2-digit',
+      ...(chartRange === 'realtime' ? { second: '2-digit' } : {})
+    });
+
+    return {
+      time: formattedTime,
+      elevasi: elev,
+      raw_distance: ultrasonicDistance,
+      local_rain: (r.local_rain || 0) * 30, // scaled for chart visibility
+      suhu: r.temperature,
+      source: r.source || 'Standard'
+    };
+  });
+
   const chartData = (useBatch360Mode && hasBatchData) 
-    ? (latestReading?.batch_data || []).map(([timeLabel, val]) => ({
-        time: timeLabel,
-        elevasi: val,
-        raw_distance: Math.max(0, Math.round((refHeight - val) * 10) / 10),
-        local_rain: 0,
-        suhu: latestReading?.temperature || 28,
-        source: 'Batch 360'
-      }))
-    : activeReadings.map((r) => {
-        const formattedTime = new Date(r.timestamp).toLocaleTimeString('id-ID', {
-          hour: '2-digit',
-          minute: '2-digit',
-          ...(chartRange === 'realtime' ? { second: '2-digit' } : {})
-        });
-        // Calculate raw ultrasonic distance (cm) if not explicitly present in legacy documents
-        const ultrasonicDistance = typeof r.distance === 'number' 
-          ? r.distance 
-          : Math.max(0, Math.round((refHeight - r.water_level) * 10) / 10);
+    ? rawBatch.map((item: any, idx: number) => {
+        let timeLabel = `T+${idx}s`;
+        let val = 0;
+        let rawDist = 0;
+
+        if (Array.isArray(item)) {
+          timeLabel = String(item[0]);
+          val = Number(item[1]) || 0;
+          rawDist = Math.max(0, Math.round((refHeight - val) * 10) / 10);
+        } else if (item && typeof item === 'object') {
+          const ts = item.timestamp ?? item.time;
+          if (typeof ts === 'number') {
+            timeLabel = new Date(ts < 10000000000 ? ts * 1000 : ts).toLocaleTimeString('id-ID', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit'
+            });
+          } else if (typeof ts === 'string') {
+            timeLabel = ts;
+          }
+
+          if (typeof item.distance === 'number') {
+            rawDist = Math.round(item.distance * 10) / 10;
+            val = Math.max(0, Math.round((refHeight - rawDist) * 10) / 10);
+          } else if (typeof item.water_level === 'number') {
+            val = Math.round(item.water_level * 10) / 10;
+            rawDist = Math.max(0, Math.round((refHeight - val) * 10) / 10);
+          }
+        }
 
         return {
-          time: formattedTime,
-          elevasi: r.water_level,
-          raw_distance: ultrasonicDistance,
-          local_rain: r.local_rain * 30, // scaled for chart visibility
-          suhu: r.temperature,
-          source: r.source || 'Standard'
+          time: timeLabel,
+          elevasi: val,
+          raw_distance: rawDist,
+          local_rain: 0,
+          suhu: latestReading?.temperature || 28,
+          source: 'Batch 360'
         };
-      });
+      })
+    : cleanReadings;
 
   // Future Prediction Points
   const predictionCurves = latestPrediction ? [
@@ -970,10 +1024,10 @@ export default function SCADADashboard({
             </span>
           </div>
         </div>
-        {latestReading?.batch_data && (
-          <span className="px-2.5 py-1 bg-[#3B82F6]/15 border border-[#3B82F6]/30 text-[#3B82F6] rounded-lg text-[10px] font-mono font-bold shrink-0 flex items-center gap-1.5">
+        {hasBatchData && (
+          <span className="px-2.5 py-1 bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 rounded-lg text-[10px] font-mono font-bold shrink-0 flex items-center gap-1.5">
             <CheckCircle2 className="w-3.5 h-3.5" />
-            Array 360 Titik Siap Ditampilkan
+            Array {rawBatch.length || 360} Titik Siap Ditampilkan
           </span>
         )}
       </div>
