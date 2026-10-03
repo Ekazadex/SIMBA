@@ -10,7 +10,7 @@ import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, addDoc, getDocs, query, orderBy, limit, setDoc, doc, onSnapshot } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, getDocs, query, orderBy, limit, setDoc, doc, onSnapshot, deleteDoc, where } from 'firebase/firestore';
 
 dotenv.config();
 
@@ -362,8 +362,43 @@ function getBMKGWindDirection(wd: string): string {
   return mapping[wd] || wd;
 }
 
+// Helper to translate wind directions to English if requested
+function translateWindDirectionToEn(wd: string): string {
+  return wd
+    .replace('Utara', 'North')
+    .replace('Selatan', 'South')
+    .replace('Timur Laut', 'Northeast')
+    .replace('Barat Daya', 'Southwest')
+    .replace('Barat Laut', 'Northwest')
+    .replace('Tenggara', 'Southeast')
+    .replace('Timur', 'East')
+    .replace('Barat', 'West');
+}
+
+// Helper to translate weather descriptions to English
+function translateConditionToEn(c: string): string {
+  const map: Record<string, string> = {
+    'Cerah': 'Clear',
+    'Cerah Berawan': 'Partly Cloudy',
+    'Berawan': 'Cloudy',
+    'Berawan Tebal': 'Overcast',
+    'Gerimis': 'Drizzle',
+    'Hujan Ringan': 'Light Rain',
+    'Hujan Sedang': 'Moderate Rain',
+    'Hujan Lebat': 'Heavy Rain',
+    'Hujan Deras': 'Heavy Downpour',
+    'Hujan Petir': 'Thunderstorm',
+    'Badai Petir': 'Severe Thunderstorm',
+    'Udara Kabur': 'Haze',
+    'Asap': 'Smoke',
+    'Kabut': 'Fog'
+  };
+  return map[c] || c;
+}
+
 // Get live local weather information card data utilizing real-time official BMKG API with Open-Meteo fallback
 app.get('/api/live-weather', async (req, res) => {
+  const isEn = (req.query.lang as string) === 'en' || (req.query.language as string) === 'en';
   let temp = 32;
   let humidity = 45;
   let precip: string | number = "0 mm";
@@ -373,7 +408,7 @@ app.get('/api/live-weather', async (req, res) => {
   let visibilityVal: string | number = "< 9 km";
   let weatherIcon = "";
   let locationName = "Pondok Cina, Beji, Kota Depok";
-  let lastUpdated = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) + ' WIB';
+  let lastUpdated = new Date().toLocaleTimeString(isEn ? 'en-US' : 'id-ID', { hour: '2-digit', minute: '2-digit' }) + (isEn ? ' WIB' : ' WIB');
   let isFromBMKG = false;
 
   // List of subdistrict adm4 codes for Depok Beji region requested by the user
@@ -422,7 +457,7 @@ app.get('/api/live-weather', async (req, res) => {
             
             isFromBMKG = true;
             console.log(`[API] BMKG direct success for ${locationName}. Temp: ${temp}°C, Humidity: ${humidity}%, Wind: ${windSpeed} km/h, Condition: ${condition}`);
-            break; // Stop once we successfully load from any of the BMKG subdistrict coordinates
+            break;
           }
         }
       }
@@ -463,12 +498,19 @@ app.get('/api/live-weather', async (req, res) => {
     }
   }
 
+  const finalWindDir = isEn ? translateWindDirectionToEn(windDir) : windDir;
+  const finalCondition = isEn ? translateConditionToEn(condition) : condition;
+
   // Step 2: Query Gemini with Google Search Grounding to extract active warnings and generate a customized expert summary
   try {
     console.log('[API] Enhancing BMKG weather with Gemini Google Search Grounding alerts.');
+    const prompt = isEn
+      ? `Search for active weather alerts (such as flood warning, heavy rain, thunderstorms) from BMKG specifically for Depok and South Jakarta today. Provide answer as JSON with field: "alerts" (array of strings, empty array if none) and "summary" (concise weather summary string in English based on real-time BMKG data: location ${locationName}, temperature ${temp}°C, humidity ${humidity}%, precipitation ${precip}, condition ${finalCondition}, wind ${windSpeed} km/h from ${finalWindDir}). Output pure JSON only without markdown code wraps.`
+      : `Cari informasi peringatan dini cuaca aktif (seperti potensi banjir, hujan lebat, angin kencang) dari BMKG khusus untuk Kota Depok dan Jakarta Selatan hari ini. Berikan jawaban dalam bentuk JSON dengan field: "alerts" (array of strings, kosongkan jika tidak ada peringatan aktif) dan "summary" (string ringkasan cuaca hari ini dalam Bahasa Indonesia berdasarkan data BMKG real-time: lokasi ${locationName}, suhu ${temp}°C, kelembaban ${humidity}%, curah hujan ${precip}, kondisi ${condition}, angin ${windSpeed} km/jam dari ${windDir}). Pastikan output hanyalah JSON murni tanpa pembungkus markdown code wraps.`;
+
     const response = await ai.models.generateContent({
       model: 'gemini-3.5-flash',
-      contents: `Cari informasi peringatan dini cuaca aktif (seperti potensi banjir, hujan lebat, angin kencang) dari BMKG khusus untuk Kota Depok dan Jakarta Selatan hari ini. Berikan jawaban dalam bentuk JSON dengan field: "alerts" (array of strings, kosongkan jika tidak ada peringatan aktif) dan "summary" (string ringkasan cuaca hari ini dalam Bahasa Indonesia berdasarkan data BMKG real-time: lokasi ${locationName}, suhu ${temp}°C, kelembaban ${humidity}%, curah hujan ${precip}, kondisi ${condition}, angin ${windSpeed} km/jam dari ${windDir}). Pastikan output hanyalah JSON murni tanpa pembungkus markdown code wraps.`,
+      contents: prompt,
       config: {
         tools: [{ googleSearch: {} }],
         responseMimeType: 'application/json',
@@ -483,31 +525,35 @@ app.get('/api/live-weather', async (req, res) => {
       precipitation_mm: precip,
       temperature_c: temp,
       humidity_percent: humidity,
-      condition,
+      condition: finalCondition,
       wind_speed_kph: windSpeed,
-      wind_direction: windDir,
+      wind_direction: finalWindDir,
       visibility_km: visibilityVal,
       weather_icon: weatherIcon,
       location_name: locationName,
       alerts: geminiData.alerts || [],
       last_updated: lastUpdated,
-      summary: geminiData.summary || `Kondisi cuaca saat ini di ${locationName} terpantau ${condition} dengan suhu udara ${temp}°C, kelembapan ${humidity}%, angin berhembus ${windSpeed} km/jam dari ${windDir}. Tidak ada peringatan dini bencana banjir aktif.`
+      summary: geminiData.summary || (isEn
+        ? `Current weather in ${locationName} is ${finalCondition} with temperature ${temp}°C, humidity ${humidity}%, and wind at ${windSpeed} km/h from ${finalWindDir}. No severe flood warnings currently active.`
+        : `Kondisi cuaca saat ini di ${locationName} terpantau ${condition} dengan suhu udara ${temp}°C, kelembapan ${humidity}%, angin berhembus ${windSpeed} km/jam dari ${windDir}. Tidak ada peringatan dini bencana banjir aktif.`)
     });
   } catch (error: any) {
-    console.log('[INFO] live-weather Gemini enhancement failed. Returning structured BMKG data.');
+    console.log('[INFO] live-weather Gemini enhancement fallback.');
     return res.json({
       precipitation_mm: precip,
       temperature_c: temp,
       humidity_percent: humidity,
-      condition,
+      condition: finalCondition,
       wind_speed_kph: windSpeed,
-      wind_direction: windDir,
+      wind_direction: finalWindDir,
       visibility_km: visibilityVal,
       weather_icon: weatherIcon,
       location_name: locationName,
       alerts: [],
       last_updated: lastUpdated,
-      summary: `Kondisi cuaca wilayah ${locationName} terpantau ${condition} dengan suhu udara ${temp}°C, kelembaban ${humidity}%, dan arah angin dari ${windDir}. Layanan peringatan dini BMKG dialihkan ke mode pemantauan lokal otomatis.`
+      summary: isEn
+        ? `Weather in ${locationName} is ${finalCondition} with temperature ${temp}°C, humidity ${humidity}%, and wind from ${finalWindDir}. BMKG monitoring runs in standard automated mode.`
+        : `Kondisi cuaca wilayah ${locationName} terpantau ${condition} dengan suhu udara ${temp}°C, kelembaban ${humidity}%, dan arah angin dari ${windDir}. Layanan peringatan dini BMKG dialihkan ke mode pemantauan lokal otomatis.`
     });
   }
 });
@@ -620,12 +666,94 @@ Berdasarkan pembacaan aktual sensor tinggi muka air saat ini sebesar ${curLevel}
   }
 });
 
-// Trigger manual simulation tick or controlled scenario upon request from Admin Panel
+// Helper to reset simulation and clean up simulated data from database
+async function resetSimulationData() {
+  stopManualScenario();
+  currentConfig.auto_simulation = false;
+
+  try {
+    // Persist auto_simulation: false to Firestore system_config for active node
+    const activeNodeId = currentConfig.node_id || DEFAULT_NODE_ID;
+    await Promise.all([
+      setDoc(doc(db, 'system_config', activeNodeId), {
+        auto_simulation: false,
+        last_updated: Date.now()
+      }, { merge: true }),
+      setDoc(doc(db, 'system_config', 'default'), {
+        auto_simulation: false,
+        last_updated: Date.now()
+      }, { merge: true })
+    ]).catch(console.error);
+
+    let totalDeleted = 0;
+    let keepCleaning = true;
+    let iterations = 0;
+
+    // Thoroughly clean simulated sensor readings in loops until none remain
+    while (keepCleaning && iterations < 5) {
+      iterations++;
+      const q = query(
+        collection(db, 'sensor_readings'),
+        orderBy('timestamp', 'desc'),
+        limit(300)
+      );
+      const snap = await getDocs(q);
+      if (snap.empty) {
+        break;
+      }
+
+      const deletes: Promise<any>[] = [];
+      let foundSim = 0;
+      snap.docs.forEach((d) => {
+        const data = d.data();
+        const src = (data.source || '').toLowerCase();
+        if (src.includes('simulat') || src.includes('scenario') || src === 'simulated') {
+          foundSim++;
+          deletes.push(deleteDoc(d.ref));
+        }
+      });
+
+      if (deletes.length > 0) {
+        await Promise.all(deletes);
+        totalDeleted += deletes.length;
+      }
+
+      // If in this batch of 300 we found fewer simulated than examined, or 0, we can stop
+      if (foundSim < 5) {
+        keepCleaning = false;
+      }
+    }
+
+    await addDoc(collection(db, 'system_logs'), {
+      timestamp: Date.now(),
+      source: 'System',
+      level: 'info',
+      message: '[RESET SIMULASI] Data simulasi direset. Sistem kembali memantau data aktual dari ESP32 (jika alat offline, status STANDBY).'
+    }).catch(console.error);
+
+    console.log(`[Simulator] Simulation reset complete. Removed ${totalDeleted} simulated readings.`);
+    return { success: true, count: totalDeleted };
+  } catch (err) {
+    console.error('Error during simulation reset cleanup:', err);
+    throw err;
+  }
+}
+
+// Trigger manual simulation tick, scenario, or reset upon request from Admin Panel
 app.post('/api/sim-data', express.json(), async (req, res) => {
   try {
     const { mode, water_level, scenario, action } = req.body;
     console.log(`[API] Injected simulation command: mode=${mode}, water_level=${water_level}, scenario=${scenario}, action=${action}`);
     
+    if (action === 'reset' || scenario === 'reset') {
+      const resetResult = await resetSimulationData();
+      return res.json({ 
+        success: true, 
+        message: 'Simulation reset. System returned to real ESP32 data.',
+        deletedCount: resetResult.count 
+      });
+    }
+
     if (action === 'stop' || scenario === 'stop') {
       stopManualScenario();
       return res.json({ success: true, message: 'Simulation stopped and paused.' });
@@ -642,6 +770,10 @@ app.post('/api/sim-data', express.json(), async (req, res) => {
     if (mode) {
       currentConfig.simulation_mode = mode;
     }
+    currentConfig.auto_simulation = true;
+    const activeNodeId = currentConfig.node_id || DEFAULT_NODE_ID;
+    setDoc(doc(db, 'system_config', activeNodeId), { auto_simulation: true, last_updated: Date.now() }, { merge: true }).catch(console.error);
+
     const result = await generateSimulationData(true, typeof water_level === 'number' ? water_level : undefined);
     res.json({ success: true, message: `Single simulation tick executed`, data: result });
   } catch (error: any) {
@@ -650,9 +782,27 @@ app.post('/api/sim-data', express.json(), async (req, res) => {
   }
 });
 
+// Dedicated endpoint for resetting simulation back to real hardware telemetry
+app.post('/api/sim-data/reset', express.json(), async (req, res) => {
+  try {
+    const result = await resetSimulationData();
+    res.json({ 
+      success: true, 
+      message: 'Simulasi berhasil direset. Sistem kembali mengikuti telemetri real ESP32.',
+      deletedCount: result.count 
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Gagal mereset simulasi' });
+  }
+});
+
 // Endpoint specifically for starting/stopping the manual heavy rain flood scenario
-app.post('/api/sim-data/scenario', express.json(), (req, res) => {
+app.post('/api/sim-data/scenario', express.json(), async (req, res) => {
   const { scenario = 'heavy_rain_flood', action = 'start' } = req.body;
+  if (action === 'reset') {
+    const result = await resetSimulationData();
+    return res.json({ success: true, status: 'reset', message: 'Scenario reset to real hardware telemetry.', deletedCount: result.count });
+  }
   if (action === 'stop') {
     stopManualScenario();
     return res.json({ success: true, status: 'stopped', message: 'Manual simulation scenario stopped.' });
@@ -826,18 +976,23 @@ app.post('/api/telemetry/batch', express.json(), async (req, res) => {
       return res.status(400).json({ error: 'No valid numeric readings found in batch array.' });
     }
 
+    // Check if input items represent raw ultrasonic distances vs calculated water levels
+    const hasDistanceField = rawArray.some(item => typeof item === 'object' && typeof item?.distance === 'number');
+    const isDistanceArray = Boolean(distances) || hasDistanceField;
+
     // Determine representative water level (e.g. median / latest stable value)
     const sortedLevels = [...validLevels].sort((a, b) => a - b);
     const medianVal = sortedLevels[Math.floor(sortedLevels.length / 2)];
     
-    // If the numbers were raw distances (e.g. median > 100 with water_level context or explicitly distance)
-    let finalWaterLevel = Math.round(medianVal * 10) / 10;
-    let finalDistance = Math.max(0, currentConfig.reference_height - finalWaterLevel);
+    let finalWaterLevel = 0;
+    let finalDistance = 0;
 
-    // If input explicitly provided raw distances (all values < reference_height and specified as distance)
-    if (Array.isArray(distances) && !isPairArray) {
+    if (isDistanceArray) {
       finalDistance = Math.round(medianVal * 10) / 10;
       finalWaterLevel = getCorrectedWaterLevel(finalDistance, tempVal, currentConfig.reference_height);
+    } else {
+      finalWaterLevel = Math.round(medianVal * 10) / 10;
+      finalDistance = Math.max(0, currentConfig.reference_height - finalWaterLevel);
     }
 
     let alertStatus: 'Normal' | 'Siaga' | 'Bahaya' = 'Normal';
@@ -858,6 +1013,7 @@ app.post('/api/telemetry/batch', express.json(), async (req, res) => {
       distance: finalDistance,
       samples_count: batchDataPairs.length,
       batch_data: batchDataPairs, // Storing full 360 pairs array in this single document
+      readings: rawArray, // Storing original raw readings array for ESP32 compatibility
       source: 'Hardware-ESP32-Batch'
     });
 
