@@ -38,7 +38,9 @@ import {
   ExternalLink,
   Sun,
   Moon,
-  Battery
+  Globe,
+  Volume2,
+  VolumeX
 } from 'lucide-react';
 
 const NODE_ID = 'node-kukusan-01';
@@ -99,29 +101,37 @@ export default function App() {
     }
   };
 
-  // Dynamic remote battery status simulator (fluctuates based on solar charge cycles)
-  const [batteryLevel, setBatteryLevel] = useState(88);
-  const [isBatteryCharging, setIsBatteryCharging] = useState(false);
+  // Multi-language support: 'id' (Bahasa Indonesia) or 'en' (English)
+  const [language, setLanguage] = useState<'id' | 'en'>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('simba_scada_language');
+      if (saved === 'id' || saved === 'en') return saved;
+    }
+    return 'id';
+  });
 
-  useEffect(() => {
-    const updateBattery = () => {
-      const hour = new Date().getHours();
-      const charging = hour >= 6 && hour < 18; // Solar active charging period
-      let percentage = 88;
-      if (charging) {
-        percentage = Math.floor(82 + ((hour - 6) / 12) * 16);
-      } else {
-        const nightHour = hour >= 18 ? hour - 18 : hour + 6;
-        percentage = Math.max(75, Math.floor(98 - (nightHour / 12) * 16));
-      }
-      setBatteryLevel(percentage);
-      setIsBatteryCharging(charging);
-    };
+  const toggleLanguage = () => {
+    const next = language === 'id' ? 'en' : 'id';
+    setLanguage(next);
+    localStorage.setItem('simba_scada_language', next);
+  };
 
-    updateBattery();
-    const interval = setInterval(updateBattery, 60000);
-    return () => clearInterval(interval);
-  }, []);
+  // Global Audio Alarm Mute/Unmute state accessible in the Navbar
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('scada_sound_enabled') !== 'false';
+    }
+    return true;
+  });
+
+  const handleToggleSound = () => {
+    const next = !soundEnabled;
+    setSoundEnabled(next);
+    localStorage.setItem('scada_sound_enabled', String(next));
+    if (next && (window as any).__playAlertSound) {
+      (window as any).__playAlertSound('Siaga');
+    }
+  };
 
   // Load saved admin login on initialization
   useEffect(() => {
@@ -217,19 +227,29 @@ export default function App() {
     setLatestReading(reading);
     if (reading && typeof reading.water_level === 'number') {
       setLatestLevel(reading.water_level);
+    } else {
+      setLatestLevel(0);
     }
     if (reading) {
       let ts = reading.timestamp ?? (reading as any).updated_at ?? (reading as any).created_at;
       if (typeof ts === 'number') {
         setLatestReadingTs(ts < 10000000000 ? ts * 1000 : ts);
       }
+    } else {
+      setLatestReadingTs(null);
     }
   }, []);
 
-  // 30 seconds interval check to determine if hardware is offline (> 8 mins)
+  // 10 seconds interval check to determine if hardware is offline (> 8 mins)
   useEffect(() => {
     const checkTimeout = () => {
-      if (!latestReadingTs) {
+      if (!latestReading || !latestReadingTs) {
+        setIsAppDeviceOffline(true);
+        return;
+      }
+      const isSim = latestReading.source?.toLowerCase().includes('simulat') || latestReading.source?.toLowerCase().includes('scenario');
+      if (isSim) {
+        // Active simulation is live and should trigger Siaga / Bahaya screen effects
         setIsAppDeviceOffline(false);
         return;
       }
@@ -237,9 +257,25 @@ export default function App() {
       setIsAppDeviceOffline(diffMs > 8 * 60 * 1000); // 480.000 ms
     };
     checkTimeout();
-    const interval = setInterval(checkTimeout, 30000); // Check every 30 seconds
+    const interval = setInterval(checkTimeout, 10000);
     return () => clearInterval(interval);
-  }, [latestReadingTs]);
+  }, [latestReading, latestReadingTs]);
+
+  // Handler to reset simulation back to actual ESP32 hardware telemetry
+  const handleResetSimulation = async () => {
+    try {
+      const cfgRef = doc(db, 'system_config', config?.node_id || NODE_ID);
+      await setDoc(cfgRef, { auto_simulation: false, last_updated: Date.now() }, { merge: true }).catch(console.error);
+      await fetch('/api/sim-data/reset', { method: 'POST' });
+      // Reset local states to offline immediately
+      setLatestReading(null);
+      setLatestLevel(0);
+      setLatestReadingTs(null);
+      setIsAppDeviceOffline(true);
+    } catch (e) {
+      console.error('Reset simulation error:', e);
+    }
+  };
 
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [inputUsername, setInputUsername] = useState('');
@@ -360,14 +396,6 @@ export default function App() {
   const themeNav = isDark ? 'bg-[#0D0D0F]/90 border-white/5' : 'bg-white border-slate-200 shadow-sm';
   const themeFooter = isDark ? 'border-t border-white/5 bg-[#0A0A0B]' : 'border-t border-slate-200 bg-white shadow-inner';
 
-  const batteryColorClass = batteryLevel > 30
-    ? isDark
-      ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
-      : 'text-emerald-700 bg-emerald-50 border-emerald-100'
-    : isDark
-      ? 'text-rose-400 bg-rose-500/10 border-rose-500/20'
-      : 'text-rose-700 bg-rose-50 border-rose-100';
-
   return (
     <div id="app-root" className={`min-h-screen ${themeBg} ${themeText} flex flex-col font-sans border-[0px] ${themeBorder} scada-grid transition-all duration-700 ease-in-out relative`}>
       
@@ -375,20 +403,18 @@ export default function App() {
       {currentAlertStatus === 'Siaga' && (
         <div 
           id="warning-overlay-siaga"
-          className="fixed inset-0 z-[99999] pointer-events-none transition-transform duration-100 ease-out origin-center"
+          className="fixed inset-0 z-[99999] pointer-events-none scada-screen-siaga transition-transform duration-100 ease-out origin-center"
           style={{ 
-            background: 'radial-gradient(circle, rgba(234, 179, 8, 0.15) 30%, rgba(234, 179, 8, 0.60) 100%)',
-            opacity: 0.4
+            background: 'radial-gradient(circle at center, rgba(234, 179, 8, 0.15) 20%, rgba(234, 179, 8, 0.60) 100%)'
           }} 
         />
       )}
       {currentAlertStatus === 'Bahaya' && (
         <div 
           id="warning-overlay-bahaya"
-          className="fixed inset-0 z-[99999] pointer-events-none transition-transform duration-75 ease-out origin-center"
+          className="fixed inset-0 z-[99999] pointer-events-none scada-screen-bahaya transition-transform duration-75 ease-out origin-center"
           style={{ 
-            background: 'radial-gradient(circle, rgba(239, 68, 68, 0.25) 20%, rgba(220, 38, 38, 0.80) 100%)',
-            opacity: 0.5
+            background: 'radial-gradient(circle at center, rgba(239, 68, 68, 0.25) 15%, rgba(220, 38, 38, 0.85) 100%)'
           }} 
         />
       )}
@@ -399,37 +425,68 @@ export default function App() {
         {/* BRAND & STATUS HEADER */}
         <div className="flex flex-wrap items-center gap-2.5">
           <div className="flex items-center gap-3">
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-activity w-4 h-4 text-[#3B82F6]" aria-hidden="true"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"></path></svg>
+            <Activity className="w-4 h-4 text-[#3B82F6]" />
             <span className={`text-[11px] uppercase tracking-[0.3em] font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
               SIMBA RTU COMM v2.1
             </span>
           </div>
-          <span className={`text-[9px] font-mono px-2 py-0.5 rounded border ${
-            isDark 
-              ? 'text-[#3B82F6] bg-white/5 border-white/10' 
-              : 'text-blue-600 bg-blue-50 border-blue-100'
-          }`}>
-            KUKUSAN-01
-          </span>
-          <span className={`text-[9px] font-mono px-2 py-0.5 rounded border flex items-center gap-1 ${
+
+          <span className={`text-[9px] font-mono px-2 py-0.5 rounded border flex items-center gap-1.5 ${
             isDark 
               ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' 
               : 'text-emerald-700 bg-emerald-50 border-emerald-100'
           }`}>
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
-            FIRESTORE CONNECTED
-          </span>
-          
-          {/* Visual Hardware Battery Status Indicator */}
-          <span className={`text-[9px] font-mono px-2 py-0.5 rounded border flex items-center gap-1 ${batteryColorClass}`} title={isBatteryCharging ? 'Baterai Pengisian Daya via Solar Panel (Siang)' : 'Baterai Menggunakan Daya Cadangan (Malam)'}>
-            <Battery className="w-3.5 h-3.5 mr-0.5" />
-            <span>BATT {batteryLevel}% {isBatteryCharging ? '(CHARGING)' : '(DISCHARGING)'}</span>
+            {language === 'en' ? 'FIRESTORE CONNECTED' : 'FIRESTORE TERHUBUNG'}
           </span>
         </div>
 
         {/* CONTROLS & AUTH */}
-        <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto justify-end">
+        <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto justify-end">
           
+          {/* LANGUAGE SWITCHER BUTTON (ID / EN) */}
+          <button
+            id="btn-language-toggle"
+            onClick={toggleLanguage}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-[11px] font-mono font-bold transition-all cursor-pointer ${
+              isDark 
+                ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300' 
+                : 'bg-white hover:bg-slate-100 border-slate-200 text-slate-700 shadow-sm'
+            }`}
+            title={language === 'id' ? 'Switch to English (Ganti ke Bahasa Inggris)' : 'Ganti ke Bahasa Indonesia (Switch to Indonesian)'}
+          >
+            <Globe className="w-3.5 h-3.5 text-[#3B82F6]" />
+            <span className={language === 'id' ? 'text-[#3B82F6] font-extrabold' : 'text-slate-500'}>ID</span>
+            <span className="text-slate-500/40">/</span>
+            <span className={language === 'en' ? 'text-[#3B82F6] font-extrabold' : 'text-slate-500'}>EN</span>
+          </button>
+
+          {/* AUDIO ALARM GLOBAL TOGGLE BUTTON */}
+          <button
+            id="nav-toggle-sound"
+            onClick={handleToggleSound}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-[11px] font-mono font-semibold transition-all cursor-pointer ${
+              soundEnabled 
+                ? 'bg-amber-500/10 border-amber-500/30 text-amber-500 hover:bg-amber-500/20' 
+                : isDark 
+                  ? 'bg-white/5 border-white/5 text-slate-500 hover:text-slate-300' 
+                  : 'bg-slate-100 border-slate-200 text-slate-500 hover:text-slate-700'
+            }`}
+            title={soundEnabled ? (language === 'en' ? 'Mute Audio Alarm' : 'Matikan Suara Alarm') : (language === 'en' ? 'Unmute Audio Alarm' : 'Aktifkan Suara Alarm')}
+          >
+            {soundEnabled ? (
+              <>
+                <Volume2 className="w-3.5 h-3.5 text-amber-500 animate-pulse" />
+                <span className="text-[10px] hidden sm:inline">{language === 'en' ? 'ALARM: ON' : 'ALARM: AKTIF'}</span>
+              </>
+            ) : (
+              <>
+                <VolumeX className="w-3.5 h-3.5 text-slate-500" />
+                <span className="text-[10px] hidden sm:inline">{language === 'en' ? 'ALARM: OFF' : 'ALARM: MATI'}</span>
+              </>
+            )}
+          </button>
+
           {/* THEME TOGGLER BUTTON */}
           <button
             id="theme-toggle"
@@ -439,7 +496,7 @@ export default function App() {
                 ? 'bg-white/5 hover:bg-white/10 border-white/10 text-amber-400' 
                 : 'bg-white hover:bg-slate-100 border-slate-200 text-amber-500 shadow-sm'
             }`}
-            title={isDark ? 'Ganti ke Mode Terang' : 'Ganti ke Mode Gelap'}
+            title={isDark ? (language === 'en' ? 'Switch to Light Mode' : 'Ganti ke Mode Terang') : (language === 'en' ? 'Switch to Dark Mode' : 'Ganti ke Mode Gelap')}
           >
             {isDark ? <Sun className="w-4 h-4 animate-spin-slow" /> : <Moon className="w-4 h-4" />}
           </button>
@@ -460,7 +517,7 @@ export default function App() {
               }`}
             >
               <LayoutDashboard className="w-3.5 h-3.5" />
-              Dashboard
+              {language === 'en' ? 'Dashboard' : 'Dashboard'}
             </button>
 
             <button
@@ -475,7 +532,7 @@ export default function App() {
               }`}
             >
               <ShieldCheck className="w-3.5 h-3.5" />
-              Kontrol PLC
+              {language === 'en' ? 'PLC Control' : 'Kontrol PLC'}
             </button>
           </div>
 
@@ -543,8 +600,14 @@ export default function App() {
             : 'bg-slate-100 border-b border-slate-300 text-slate-600'
         } text-[11px] px-4 py-2 flex items-center justify-center gap-2 text-center font-mono uppercase tracking-wider`}>
           <span className="w-2 h-2 rounded-full bg-slate-400 inline-block" />
-          <span className={`font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>[ STATUS OFFLINE ] :</span>
-          <span>Perangkat RTU ESP32 tidak mengirim data baru lebih dari 8 menit. Telemetri otomatis dibekukan.</span>
+          <span className={`font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+            {language === 'en' ? '[ STATUS: OFFLINE ] :' : '[ STATUS OFFLINE ] :'}
+          </span>
+          <span>
+            {language === 'en'
+              ? 'RTU ESP32 device has not sent new data for over 8 minutes. Telemetry automatically paused.'
+              : 'Perangkat RTU ESP32 tidak mengirim data baru lebih dari 8 menit. Telemetri otomatis dibekukan.'}
+          </span>
         </div>
       ) : config && config.status_alat === 'Online' && (
         <div id="alert-banner" className={`${
@@ -553,8 +616,14 @@ export default function App() {
             : 'bg-rose-50 border-b border-rose-100 text-rose-700'
         } text-[11px] px-4 py-2 flex items-center justify-center gap-2 text-center font-mono uppercase tracking-wider`}>
           <span className="w-2 h-2 rounded-full bg-rose-500 scada-led-blink inline-block" />
-          <span className={`font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>[ NOTIFIKASI AKTIF ] :</span>
-          <span>Sinyal Telemetri Real-Time & Model Prediktif Hidrologi Lokal SIMBA Aktif (Kalibrasi Parameter BPBD & UI).</span>
+          <span className={`font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+            {language === 'en' ? '[ ACTIVE MONITORING ] :' : '[ NOTIFIKASI AKTIF ] :'}
+          </span>
+          <span>
+            {language === 'en'
+              ? 'Real-Time Telemetry & SIMBA Local Hydrology Predictive Model Active (BPBD & UI Calibrated).'
+              : 'Sinyal Telemetri Real-Time & Model Prediktif Hidrologi Lokal SIMBA Aktif (Kalibrasi Parameter BPBD & UI).'}
+          </span>
         </div>
       )}
 
@@ -577,7 +646,7 @@ export default function App() {
                 : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-600 shadow-sm'
             }`}
           >
-            Buka Tab Baru
+            {language === 'en' ? 'Open in New Tab' : 'Buka Tab Baru'}
             <ExternalLink className="w-3 h-3" />
           </button>
         </div>
@@ -595,6 +664,10 @@ export default function App() {
             prefPushBahaya={prefPushBahaya}
             onNavigateTab={setActiveTab}
             onLatestReadingChange={handleLatestReadingChange}
+            language={language}
+            soundEnabled={soundEnabled}
+            onToggleSound={handleToggleSound}
+            onResetSimulation={handleResetSimulation}
           />
         ) : (
           <AdminPanel 
@@ -609,6 +682,9 @@ export default function App() {
             onUpdatePreferences={handleUpdatePreferences}
             onLogin={setUser}
             latestReading={latestReading}
+            language={language}
+            onNavigateTab={setActiveTab}
+            onResetSimulation={handleResetSimulation}
           />
         )}
       </main>
@@ -618,7 +694,9 @@ export default function App() {
         isDark ? 'text-white/30' : 'text-slate-400'
       }`}>
         <p className="max-w-7xl mx-auto px-4">
-          PROYEK CAPSTONE KELOMPOK 12 • JSN-SR04T ULTRASONIC & BMKG WEATHER DATA FUSION • DEEP LEARNING MODEL PREDICTION
+          {language === 'en'
+            ? 'CAPSTONE PROJECT GROUP 12 • JSN-SR04T ULTRASONIC & BMKG WEATHER DATA FUSION • DEEP LEARNING MODEL PREDICTION'
+            : 'PROYEK CAPSTONE KELOMPOK 12 • FUSI DATA ULTRASONIK JSN-SR04T & CUACA BMKG • PREDIKSI MODEL DEEP LEARNING'}
         </p>
       </footer>
 
@@ -632,7 +710,7 @@ export default function App() {
               className={`absolute top-4 right-4 p-1.5 rounded-lg border ${
                 isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-slate-100 hover:bg-slate-200 border-slate-200'
               } text-slate-400 hover:text-slate-200 cursor-pointer transition-all`}
-              title="Tutup"
+              title={language === 'en' ? 'Close' : 'Tutup'}
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -643,14 +721,20 @@ export default function App() {
               <Lock className="w-5 h-5 animate-pulse" />
             </div>
 
-            <h3 className={`font-bold text-xl text-center ${isDark ? 'text-white' : 'text-slate-900'} mb-1`}>Otentikasi Administrator PLC</h3>
+            <h3 className={`font-bold text-xl text-center ${isDark ? 'text-white' : 'text-slate-900'} mb-1`}>
+              {language === 'en' ? 'PLC Administrator Authentication' : 'Otentikasi Administrator PLC'}
+            </h3>
             <p className={`text-xs text-center ${isDark ? 'text-white/50' : 'text-slate-500'} mb-6 leading-relaxed`}>
-              Harap masukkan nama pengguna dan kata sandi khusus yang tersinkronisasi di server untuk mengontrol parameter fisik PLC & RTU SIMBA.
+              {language === 'en'
+                ? 'Please enter synchronized administrator credentials to unlock physical parameter configuration for PLC & RTU SIMBA.'
+                : 'Harap masukkan nama pengguna dan kata sandi khusus yang tersinkronisasi di server untuk mengontrol parameter fisik PLC & RTU SIMBA.'}
             </p>
 
             <form onSubmit={handleCustomLogin} className="space-y-4">
               <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">Username</label>
+                <label className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
+                  {language === 'en' ? 'Username' : 'Nama Pengguna (Username)'}
+                </label>
                 <input 
                   type="text" 
                   value={inputUsername}
@@ -666,7 +750,9 @@ export default function App() {
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">Password</label>
+                <label className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
+                  {language === 'en' ? 'Password' : 'Kata Sandi (Password)'}
+                </label>
                 <input 
                   type="password" 
                   value={inputPassword}
@@ -690,7 +776,7 @@ export default function App() {
                 className="w-full flex items-center justify-center gap-2 py-3 bg-[#3B82F6] hover:bg-blue-600 text-black text-xs font-bold rounded-xl cursor-pointer transition-all shadow-md mt-2"
               >
                 <ShieldCheck className="w-4 h-4" />
-                Masuk Konsol PLC
+                {language === 'en' ? 'Unlock PLC Console (Log In)' : 'Buka Konsol PLC (Masuk)'}
               </button>
             </form>
 

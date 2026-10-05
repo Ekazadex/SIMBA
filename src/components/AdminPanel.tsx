@@ -59,6 +59,9 @@ interface AdminPanelProps {
   }) => void;
   onLogin?: (user: any) => void;
   latestReading?: SensorReading | null;
+  language?: 'id' | 'en';
+  onNavigateTab?: (tab: 'dashboard' | 'admin') => void;
+  onResetSimulation?: () => Promise<void>;
 }
 
 export default function AdminPanel({
@@ -72,7 +75,10 @@ export default function AdminPanel({
   prefPushBahaya = true,
   onUpdatePreferences,
   onLogin,
-  latestReading: propLatestReading
+  latestReading: propLatestReading,
+  language = 'id',
+  onNavigateTab,
+  onResetSimulation
 }: AdminPanelProps) {
   const [thresholdSiaga, setThresholdSiaga] = useState(60);
   const [thresholdBahaya, setThresholdBahaya] = useState(90);
@@ -108,7 +114,7 @@ export default function AdminPanel({
   useEffect(() => {
     const calculateTimeAgo = () => {
       if (!latestReading?.timestamp) {
-        setTimeAgoText('Menunggu data...');
+        setTimeAgoText(language === 'en' ? 'Awaiting telemetry...' : 'Menunggu data...');
         return;
       }
       const now = Date.now();
@@ -118,18 +124,35 @@ export default function AdminPanel({
       const diffHour = Math.floor(diffMin / 60);
 
       if (diffSec < 60) {
-        setTimeAgoText(`Data diterima ${diffSec} detik yang lalu`);
+        setTimeAgoText(
+          language === 'en'
+            ? `Telemetry received ${diffSec}s ago`
+            : `Data diterima ${diffSec} detik yang lalu`
+        );
       } else if (diffMin < 60) {
-        setTimeAgoText(`Data diterima ${diffMin} menit yang lalu`);
+        setTimeAgoText(
+          language === 'en'
+            ? `Telemetry received ${diffMin}m ago`
+            : `Data diterima ${diffMin} menit yang lalu`
+        );
       } else {
-        setTimeAgoText(`Data diterima ${diffHour} jam ${diffMin % 60} menit yang lalu`);
+        setTimeAgoText(
+          language === 'en'
+            ? `Telemetry received ${diffHour}h ${diffMin % 60}m ago`
+            : `Data diterima ${diffHour} jam ${diffMin % 60} menit yang lalu`
+        );
       }
     };
 
     calculateTimeAgo();
     const timer = setInterval(calculateTimeAgo, 5000);
     return () => clearInterval(timer);
-  }, [latestReading?.timestamp]);
+  }, [latestReading?.timestamp, language]);
+
+  // Simulation condition injector state
+  const [simTargetLevel, setSimTargetLevel] = useState<number>(35);
+  const [isApplyingCondition, setIsApplyingCondition] = useState<boolean>(false);
+  const [isResettingSim, setIsResettingSim] = useState<boolean>(false);
 
   // Obfuscated initial fallback to prevent GitGuardian automated alerts on hardcoded credentials
   const INITIAL_DEFAULT_SECRET = atob('QWRtaW5TczFtYjQxMg=='); // Decodes to "AdminSs1mb412"
@@ -428,10 +451,18 @@ export default function AdminPanel({
 
   const [isScenarioRunning, setIsScenarioRunning] = useState(false);
 
-  const handleStartScenario = async (scenario: 'heavy_rain_flood' | 'receding') => {
+  const handleStartScenario = async (scenario: 'heavy_rain_flood' | 'receding', openDashboard: boolean = false) => {
     setIsScenarioRunning(true);
     try {
-      await appendConsoleLog(`Memulai Skenario Manual: ${scenario === 'heavy_rain_flood' ? 'Hujan Deras -> Banjir Tinggi' : 'Surut Normal'} (Auto-Stop saat target tercapai)...`, 'warn');
+      const cfgRef = doc(db, 'system_config', config?.node_id || 'node-kukusan-01');
+      await setDoc(cfgRef, { auto_simulation: true, last_updated: Date.now() }, { merge: true }).catch(console.error);
+
+      await appendConsoleLog(
+        language === 'en'
+          ? `Starting simulation scenario: ${scenario === 'heavy_rain_flood' ? 'Heavy Rain -> High Flood' : 'Receding to Normal'} (Auto-Stop at threshold)...`
+          : `Memulai Skenario Manual: ${scenario === 'heavy_rain_flood' ? 'Hujan Deras -> Banjir Tinggi' : 'Surut Normal'} (Auto-Stop saat target tercapai)...`,
+        'warn'
+      );
       const res = await fetch('/api/sim-data/scenario', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -439,11 +470,76 @@ export default function AdminPanel({
       });
       const data = await res.json();
       if (data.success) {
-        await appendConsoleLog(`Skenario "${scenario}" aktif. Simulasi akan otomatis PAUSE setelah High Flood dilaporkan.`, 'info');
+        await appendConsoleLog(
+          language === 'en'
+            ? `Scenario "${scenario}" active. Simulation will pause after High Flood is reached.`
+            : `Skenario "${scenario}" aktif. Simulasi akan otomatis PAUSE setelah High Flood dilaporkan.`,
+          'info'
+        );
+      }
+      if (openDashboard && onNavigateTab) {
+        onNavigateTab('dashboard');
       }
     } catch (e) {
       console.error(e);
-      await appendConsoleLog('Gagal menjalankan skenario manual.', 'error');
+      await appendConsoleLog(language === 'en' ? 'Failed to execute manual scenario.' : 'Gagal menjalankan skenario manual.', 'error');
+    }
+  };
+
+  const handleApplyCondition = async (level: number, openDashboard: boolean = true) => {
+    setIsApplyingCondition(true);
+    try {
+      const cfgRef = doc(db, 'system_config', config?.node_id || 'node-kukusan-01');
+      await setDoc(cfgRef, { auto_simulation: true, last_updated: Date.now() }, { merge: true }).catch(console.error);
+
+      const res = await fetch('/api/sim-data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ water_level: level, mode: 'custom' })
+      });
+      await res.json();
+      await appendConsoleLog(
+        language === 'en'
+          ? `Simulation condition applied: TMA = ${level} cm`
+          : `Kondisi simulasi diterapkan: TMA = ${level} cm`,
+        level >= (config?.threshold_bahaya || 90) ? 'error' : level >= (config?.threshold_siaga || 60) ? 'warn' : 'info'
+      );
+      if (openDashboard && onNavigateTab) {
+        onNavigateTab('dashboard');
+      }
+    } catch (err) {
+      console.error(err);
+      await appendConsoleLog(language === 'en' ? 'Failed to apply simulation condition.' : 'Gagal menerapkan kondisi simulasi.', 'error');
+    } finally {
+      setIsApplyingCondition(false);
+    }
+  };
+
+  const handleResetAllSimulation = async (openDashboard: boolean = false) => {
+    setIsResettingSim(true);
+    try {
+      setIsScenarioRunning(false);
+      const cfgRef = doc(db, 'system_config', config?.node_id || 'node-kukusan-01');
+      await setDoc(cfgRef, { auto_simulation: false, last_updated: Date.now() }, { merge: true }).catch(console.error);
+
+      if (onResetSimulation) {
+        await onResetSimulation();
+      } else {
+        await fetch('/api/sim-data/reset', { method: 'POST' });
+      }
+      await appendConsoleLog(
+        language === 'en'
+          ? 'Simulation reset complete. Reverted to real ESP32 telemetry (if offline, displays -- cm).'
+          : 'Reset simulasi selesai. Kembali ke data real ESP32 (jika offline, tampil -- cm).',
+        'info'
+      );
+      if (openDashboard && onNavigateTab) {
+        onNavigateTab('dashboard');
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsResettingSim(false);
     }
   };
 
@@ -455,7 +551,12 @@ export default function AdminPanel({
         body: JSON.stringify({ action: 'stop' })
       });
       setIsScenarioRunning(false);
-      await appendConsoleLog('Simulasi dihentikan dan dijeda (PAUSED) pada laporan saat ini.', 'warn');
+      await appendConsoleLog(
+        language === 'en'
+          ? 'Simulation stopped and paused on current reading.'
+          : 'Simulasi dihentikan dan dijeda (PAUSED) pada laporan saat ini.',
+        'warn'
+      );
     } catch (e) {
       console.error(e);
     }
@@ -466,7 +567,12 @@ export default function AdminPanel({
     setAutoSim(nextVal);
     try {
       await onUpdateConfig({ auto_simulation: nextVal });
-      await appendConsoleLog(`Simulasi Otomatis ${nextVal ? 'DIAKTIFKAN' : 'DINONAKTIFKAN'}`, 'info');
+      await appendConsoleLog(
+        language === 'en'
+          ? `Auto-Simulation ${nextVal ? 'ENABLED' : 'DISABLED'}`
+          : `Simulasi Otomatis ${nextVal ? 'DIAKTIFKAN' : 'DINONAKTIFKAN'}`,
+        'info'
+      );
     } catch (e) {
       console.error(e);
     }
@@ -475,12 +581,22 @@ export default function AdminPanel({
   const triggerManualCalibration = async () => {
     setStatusAlat('Calibrating');
     await onUpdateConfig({ status_alat: 'Calibrating' });
-    await appendConsoleLog('Memulai kalibrasi kompensasi rambat bunyi JSN-SR04T...', 'info');
+    await appendConsoleLog(
+      language === 'en'
+        ? 'Starting JSN-SR04T acoustic propagation calibration...'
+        : 'Memulai kalibrasi kompensasi rambat bunyi JSN-SR04T...',
+      'info'
+    );
     
     setTimeout(async () => {
       setStatusAlat('Online');
       await onUpdateConfig({ status_alat: 'Online' });
-      await appendConsoleLog('Kalibrasi JSN-SR04T selesai. Kecepatan bunyi: 343.4 m/s (Koreksi Suhu: AKTIF). Status: ONLINE', 'info');
+      await appendConsoleLog(
+        language === 'en'
+          ? 'JSN-SR04T calibration complete. Speed of sound: 343.4 m/s (Temperature compensation: ACTIVE). Status: ONLINE'
+          : 'Kalibrasi JSN-SR04T selesai. Kecepatan bunyi: 343.4 m/s (Koreksi Suhu: AKTIF). Status: ONLINE',
+        'info'
+      );
     }, 3000);
   };
 
@@ -488,7 +604,12 @@ export default function AdminPanel({
     setThresholdSiaga(60);
     setThresholdBahaya(90);
     setRefHeight(300);
-    await appendConsoleLog('Parameter ambang batas & baseline di-reset ke default pabrik (Siaga: 60cm, Bahaya: 90cm, Ref: 300cm). Harap simpan perubahan.', 'info');
+    await appendConsoleLog(
+      language === 'en'
+        ? 'Thresholds & baseline reset to factory defaults (Alert: 60cm, Danger: 90cm, Ref: 300cm). Please save changes.'
+        : 'Parameter ambang batas & baseline di-reset ke default pabrik (Siaga: 60cm, Bahaya: 90cm, Ref: 300cm). Harap simpan perubahan.',
+      'info'
+    );
   };
 
   // If user is not logged in, show elegant auth block
@@ -498,9 +619,13 @@ export default function AdminPanel({
         <div className={`w-16 h-16 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-100 border-slate-200'} text-[#3B82F6] rounded-full flex items-center justify-center mx-auto mb-5`}>
           <Lock className="w-6 h-6 animate-pulse" />
         </div>
-        <h2 className={`font-bold text-2xl text-center ${isDark ? 'text-white' : 'text-slate-900'} mb-2`}>Otentikasi Administrator PLC</h2>
+        <h2 className={`font-bold text-2xl text-center ${isDark ? 'text-white' : 'text-slate-900'} mb-2`}>
+          {language === 'en' ? 'PLC Administrator Authentication' : 'Otentikasi Administrator PLC'}
+        </h2>
         <p className={`font-sans text-xs text-center ${isDark ? 'text-white/50' : 'text-slate-500'} mb-6 leading-relaxed`}>
-          Masukkan nama pengguna (username) dan kata sandi (password) khusus administrator untuk membuka akses konfigurasi parameter PLC & SCADA.
+          {language === 'en'
+            ? 'Enter your dedicated administrator username and password to unlock PLC & SCADA parameter configuration access.'
+            : 'Masukkan nama pengguna (username) dan kata sandi (password) khusus administrator untuk membuka akses konfigurasi parameter PLC & SCADA.'}
         </p>
 
         {/* Custom Login Form */}
@@ -511,7 +636,7 @@ export default function AdminPanel({
               type="text" 
               value={loginUsername}
               onChange={(e) => setLoginUsername(e.target.value)}
-              placeholder="Username admin"
+              placeholder={language === 'en' ? 'Admin username' : 'Username admin'}
               required
               className={`px-3.5 py-2.5 text-xs rounded-xl border ${
                 isDark 
@@ -546,7 +671,7 @@ export default function AdminPanel({
             className="w-full flex items-center justify-center gap-2 py-3 bg-[#3B82F6] hover:bg-blue-600 text-black text-xs font-bold rounded-xl cursor-pointer transition-all shadow-md mt-2"
           >
             <ShieldCheck className="w-4 h-4" />
-            Buka Konsol PLC (Masuk)
+            {language === 'en' ? 'Unlock PLC Console (Log In)' : 'Buka Konsol PLC (Masuk)'}
           </button>
         </form>
       </div>
@@ -567,7 +692,9 @@ export default function AdminPanel({
                 <div className={`p-2 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-150 border-slate-200'} rounded-lg text-[#3B82F6]`}>
                   <Settings className="w-4 h-4" />
                 </div>
-                <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>Kalibrasi & Konfigurasi Ambang</h3>
+                <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                  {language === 'en' ? 'Calibration & Threshold Configuration' : 'Kalibrasi & Konfigurasi Ambang'}
+                </h3>
               </div>
               <div className={`flex items-center gap-1.5 ${isDark ? 'bg-white/5 border-white/10 text-white/60' : 'bg-slate-100 border-slate-200 text-slate-600'} px-2.5 py-1 rounded text-[9px] font-mono tracking-widest uppercase`}>
                 <ShieldCheck className="w-3.5 h-3.5 text-[#3B82F6]" />
@@ -579,11 +706,13 @@ export default function AdminPanel({
               {/* Reference Height configuration */}
               <div className="flex flex-col gap-2">
                 <label className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeLabel} font-mono flex justify-between`}>
-                  <span>Tinggi Referensi Nol (Baseline)</span>
+                  <span>{language === 'en' ? 'Zero Reference Baseline (H_REF)' : 'Tinggi Referensi Nol (Baseline)'}</span>
                   <span className="text-[#3B82F6] font-semibold">{refHeight} cm</span>
                 </label>
                 <p className={`text-[11px] ${themeSubtext} leading-normal mb-1`}>
-                  Jarak total dari probe JSN-SR04T ke dasar drainase sungai (cm). Nilai ini digunakan untuk menghitung elevasi air ($h = H_ref - d$).
+                  {language === 'en'
+                    ? 'Total vertical distance from probe JSN-SR04T to riverbed/drain bottom (cm). Used for water elevation (h = H_ref - d).'
+                    : 'Jarak total dari probe JSN-SR04T ke dasar drainase sungai (cm). Nilai ini digunakan untuk menghitung elevasi air ($h = H_ref - d$).'}
                 </p>
                 <input 
                   type="range" 
@@ -598,11 +727,13 @@ export default function AdminPanel({
               {/* Threshold Siaga configuration */}
               <div className="flex flex-col gap-2">
                 <label className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeLabel} font-mono flex justify-between`}>
-                  <span>Ambang Status Siaga (Kuning)</span>
+                  <span>{language === 'en' ? 'Alert Level Threshold (Yellow)' : 'Ambang Status Siaga (Kuning)'}</span>
                   <span className="text-amber-400 font-semibold">{thresholdSiaga} cm</span>
                 </label>
                 <p className={`text-[11px] ${themeSubtext} leading-normal mb-1`}>
-                  Batas elevasi air untuk memicu status Siaga (Waspada) dan mengaktifkan notifikasi visual di Web SCADA.
+                  {language === 'en'
+                    ? 'Water elevation threshold to trigger Alert status and activate visual telemetry alerts.'
+                    : 'Batas elevasi air untuk memicu status Siaga (Waspada) dan mengaktifkan notifikasi visual di Web SCADA.'}
                 </p>
                 <input 
                   type="range" 
@@ -617,11 +748,13 @@ export default function AdminPanel({
               {/* Threshold Bahaya configuration */}
               <div className="flex flex-col gap-2">
                 <label className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeLabel} font-mono flex justify-between`}>
-                  <span>Ambang Status Bahaya (Merah)</span>
+                  <span>{language === 'en' ? 'Danger Level Threshold (Red)' : 'Ambang Status Bahaya (Merah)'}</span>
                   <span className="text-rose-400 font-semibold">{thresholdBahaya} cm</span>
                 </label>
                 <p className={`text-[11px] ${themeSubtext} leading-normal mb-1`}>
-                  Batas kritis elevasi air meluap. Memicu status Bahaya dan mempersiapkan evakuasi darurat bagi operator BPBD.
+                  {language === 'en'
+                    ? 'Critical flood overflow threshold. Triggers Danger sirens and emergency alerts for BPBD operators.'
+                    : 'Batas kritis elevasi air meluap. Memicu status Bahaya dan mempersiapkan evakuasi darurat bagi operator BPBD.'}
                 </p>
                 <input 
                   type="range" 
@@ -642,16 +775,18 @@ export default function AdminPanel({
               className={`flex items-center justify-center gap-2 px-3 py-2.5 disabled:opacity-50 text-xs font-semibold rounded-xl cursor-pointer transition-all ${themeButtonWhite}`}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${statusAlat === 'Calibrating' ? 'animate-spin' : ''}`} />
-              {statusAlat === 'Calibrating' ? 'Kalibrasi...' : 'Kalibrasi Sensor'}
+              {statusAlat === 'Calibrating' 
+                ? (language === 'en' ? 'Calibrating...' : 'Kalibrasi...') 
+                : (language === 'en' ? 'Calibrate Sensor' : 'Kalibrasi Sensor')}
             </button>
 
             <button 
               onClick={handleResetThresholds}
               className={`flex items-center justify-center gap-2 px-3 py-2.5 text-xs font-semibold rounded-xl cursor-pointer transition-all ${themeButtonWhite}`}
-              title="Reset ke nilai default pabrik (Siaga: 60 cm, Bahaya: 90 cm, Tinggi Baseline: 300 cm)"
+              title={language === 'en' ? 'Reset to factory defaults (Alert: 60cm, Danger: 90cm, Ref: 300cm)' : 'Reset ke nilai default pabrik (Siaga: 60 cm, Bahaya: 90 cm, Tinggi Baseline: 300 cm)'}
             >
               <RotateCcw className="w-3.5 h-3.5 text-amber-500" />
-              Reset Default
+              {language === 'en' ? 'Reset Defaults' : 'Reset Default'}
             </button>
 
             <button 
@@ -659,7 +794,9 @@ export default function AdminPanel({
               disabled={isSaving}
               className="flex items-center justify-center gap-2 px-3 py-2.5 bg-[#3B82F6] hover:bg-blue-600 disabled:opacity-50 text-black text-xs font-bold rounded-xl cursor-pointer transition-all"
             >
-              {isSaving ? 'Menyimpan...' : 'Simpan Perubahan'}
+              {isSaving 
+                ? (language === 'en' ? 'Saving...' : 'Menyimpan...') 
+                : (language === 'en' ? 'Save Changes' : 'Simpan Perubahan')}
             </button>
           </div>
         </div>
@@ -671,7 +808,9 @@ export default function AdminPanel({
               <div className={`p-2 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-150 border-slate-200'} rounded-lg text-amber-500`}>
                 <Bell className="w-4 h-4 text-amber-500 animate-pulse" />
               </div>
-              <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>Preferensi Notifikasi & Alarm</h3>
+              <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                {language === 'en' ? 'Notification & Alarm Preferences' : 'Preferensi Notifikasi & Alarm'}
+              </h3>
             </div>
             <div className={`flex items-center gap-1.5 ${isDark ? 'bg-white/5 border-white/10 text-white/60' : 'bg-slate-100 border-slate-200 text-slate-600'} px-2.5 py-1 rounded text-[9px] font-mono tracking-widest uppercase`}>
               OPERATOR PREFS
@@ -679,7 +818,9 @@ export default function AdminPanel({
           </div>
 
           <p className={`text-[11px] ${themeSubtext} leading-relaxed mb-6`}>
-            Atur preferensi alarm suara berbasis browser dan notifikasi push layar untuk masing-masing level status peringatan dini. Preferensi disimpan secara otomatis pada penyimpanan lokal (Local Storage) browser Anda.
+            {language === 'en'
+              ? 'Configure browser audio alarms and visual screen push alerts for each warning tier. Preferences are automatically persisted to your browser LocalStorage.'
+              : 'Atur preferensi alarm suara berbasis browser dan notifikasi push layar untuk masing-masing level status peringatan dini. Preferensi disimpan secara otomatis pada penyimpanan lokal (Local Storage) browser Anda.'}
           </p>
 
           <div className="space-y-5">
@@ -688,9 +829,15 @@ export default function AdminPanel({
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
                   <span className="w-2 h-2 rounded-full bg-amber-500 inline-block" />
-                  <span className={`text-xs font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>STATUS SIAGA (KUNING)</span>
+                  <span className={`text-xs font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                    {language === 'en' ? 'ALERT STATUS (YELLOW)' : 'STATUS SIAGA (KUNING)'}
+                  </span>
                 </div>
-                <p className={`text-[10px] ${themeSubtext}`}>Bunyi peringatan lambat (tiap 4.5 detik) & notifikasi browser ketika air melampaui batas Siaga.</p>
+                <p className={`text-[10px] ${themeSubtext}`}>
+                  {language === 'en'
+                    ? 'Intermittent alert pulse (every 4.5s) & browser notification when water reaches Alert limit.'
+                    : 'Bunyi peringatan lambat (tiap 4.5 detik) & notifikasi browser ketika air melampaui batas Siaga.'}
+                </p>
               </div>
               
               <div className="flex items-center gap-4 shrink-0 font-mono text-[10px]">
@@ -727,9 +874,15 @@ export default function AdminPanel({
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
                   <span className="w-2 h-2 rounded-full bg-rose-500 scada-led-blink inline-block" />
-                  <span className={`text-xs font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>STATUS BAHAYA (MERAH)</span>
+                  <span className={`text-xs font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                    {language === 'en' ? 'DANGER STATUS (RED)' : 'STATUS BAHAYA (MERAH)'}
+                  </span>
                 </div>
-                <p className={`text-[10px] ${themeSubtext}`}>Siren ganda cepat (tiap 1.5 detik) & notifikasi darurat ketika air melampaui batas kritis Bahaya.</p>
+                <p className={`text-[10px] ${themeSubtext}`}>
+                  {language === 'en'
+                    ? 'Urgent dual siren (every 1.5s) & critical emergency alert when water reaches Danger limit.'
+                    : 'Siren ganda cepat (tiap 1.5 detik) & notifikasi darurat ketika air melampaui batas kritis Bahaya.'}
+                </p>
               </div>
               
               <div className="flex items-center gap-4 shrink-0 font-mono text-[10px]">
@@ -771,8 +924,14 @@ export default function AdminPanel({
                 <Radio className="w-4 h-4 text-emerald-500 animate-pulse" />
               </div>
               <div>
-                <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>Integrasi Hardware ESP32 (RTU)</h3>
-                <p className={`text-[10px] ${themeSubtext} font-mono mt-0.5`}>Arsitektur Statless REST API — Tanpa Login / Bebas Token Expired</p>
+                <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                  {language === 'en' ? 'ESP32 Hardware Integration (RTU)' : 'Integrasi Hardware ESP32 (RTU)'}
+                </h3>
+                <p className={`text-[10px] ${themeSubtext} font-mono mt-0.5`}>
+                  {language === 'en'
+                    ? 'Stateless REST API Architecture — No Login / Token Expiry Free'
+                    : 'Arsitektur Statless REST API — Tanpa Login / Bebas Token Expired'}
+                </p>
               </div>
             </div>
             <div className="flex items-center gap-1.5 bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1 rounded text-[9px] font-mono text-emerald-400 font-bold tracking-widest uppercase">
@@ -781,13 +940,17 @@ export default function AdminPanel({
           </div>
 
           <p className={`text-[11px] ${themeSubtext} leading-relaxed mb-4`}>
-            Teman hardware Anda cukup menggunakan library standar <code className="font-mono text-[#3B82F6]">HTTPClient.h</code>. Data jarak pantul ultrasonik (<code className="font-mono text-emerald-400">distance</code> dalam cm) yang dikirim per batch 6 menit (360 data) akan otomatis diolah server dan dimasukkan langsung ke <strong className={isDark ? 'text-white' : 'text-slate-900'}>Cloud Firestore</strong>.
+            {language === 'en'
+              ? 'Your hardware engineer only needs the standard HTTPClient.h library. Ultrasonic reflection distance (distance in cm) sent in 6-minute batches (360 samples) is processed by the server and saved to Cloud Firestore.'
+              : 'Teman hardware Anda cukup menggunakan library standar HTTPClient.h. Data jarak pantul ultrasonik (distance dalam cm) yang dikirim per batch 6 menit (360 data) akan otomatis diolah server dan dimasukkan langsung ke Cloud Firestore.'}
           </p>
 
           <div className="space-y-3">
             <div className={`p-3 rounded-xl border ${themeInnerCard} flex flex-col sm:flex-row sm:items-center justify-between gap-2 font-mono text-[11px]`}>
               <div className="space-y-1">
-                <span className={`text-[9px] uppercase tracking-wider ${themeLabel} block`}>URL Endpoint Batch (360 Sampel / 6 Menit):</span>
+                <span className={`text-[9px] uppercase tracking-wider ${themeLabel} block`}>
+                  {language === 'en' ? 'Batch Endpoint URL (360 Samples / 6 Minutes):' : 'URL Endpoint Batch (360 Sampel / 6 Menit):'}
+                </span>
                 <span className="text-[#3B82F6] font-bold select-all break-all">
                   https://ais-pre-rzzbanv7e2ojmrqboq5vxb-265377259788.asia-southeast1.run.app/api/telemetry/batch
                 </span>
@@ -798,11 +961,13 @@ export default function AdminPanel({
             </div>
 
             <div className={`p-3 rounded-xl border ${themeInnerCard} font-mono text-[10px] space-y-1`}>
-              <span className={`text-[9px] uppercase tracking-wider ${themeLabel} block`}>Format Payload JSON dari ESP32:</span>
+              <span className={`text-[9px] uppercase tracking-wider ${themeLabel} block`}>
+                {language === 'en' ? 'JSON Payload Format from ESP32:' : 'Format Payload JSON dari ESP32:'}
+              </span>
               <pre className="text-emerald-400 bg-black/60 p-2.5 rounded-lg overflow-x-auto text-[10px] leading-relaxed">
 {`{
   "node_id": "node-kukusan-01",
-  "distances": [180.5, 180.2, 179.9, ... 360 sampel ...]
+  "distances": [180.5, 180.2, 179.9, ... 360 samples ...]
 }`}
               </pre>
             </div>
@@ -818,20 +983,22 @@ export default function AdminPanel({
               </div>
               <div>
                 <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                  Input Mandiri Peil Schaal (Mistar Lapangan)
+                  {language === 'en' ? 'Manual Staff Peil Schaal Entry (Staff Gauge)' : 'Input Mandiri Peil Schaal (Mistar Lapangan)'}
                 </h3>
                 <span className={`text-[10px] ${themeSubtext} block font-mono mt-0.5`}>
-                  STANDAR OPERASIONAL POS DUGA AIR PUPR / BBWS
+                  {language === 'en' ? 'PUPR / BBWS RIVER GAUGING SOP' : 'STANDAR OPERASIONAL POS DUGA AIR PUPR / BBWS'}
                 </span>
               </div>
             </div>
             <span className="px-2.5 py-1 rounded-lg text-[9px] font-mono font-bold bg-amber-500/15 border border-amber-500/30 text-amber-400 uppercase tracking-wider">
-              SOP DARURAT
+              {language === 'en' ? 'EMERGENCY SOP' : 'SOP DARURAT'}
             </span>
           </div>
 
           <p className={`text-[11px] ${themeSubtext} leading-relaxed mb-5`}>
-            Gunakan formulir ini jika sensor otomatis JSN-SR04T mengalami anomali (terhalang ranting bambu/sampah, kabel putus, atau mati daya). Data pembacaan mistar duga air (Peil Schaal) fisik akan langsung dikirim ke Dashboard dengan label resmi <strong>MANUAL PEIL SCHAAL</strong>.
+            {language === 'en'
+              ? 'Use this form if the automatic JSN-SR04T sensor suffers anomalies (debris obstruction, wire disconnection, or power failure). Physical staff gauge readings are sent to the Dashboard with the official MANUAL PEIL SCHAAL label.'
+              : 'Gunakan formulir ini jika sensor otomatis JSN-SR04T mengalami anomali (terhalang ranting bambu/sampah, kabel putus, atau mati daya). Data pembacaan mistar duga air (Peil Schaal) fisik akan langsung dikirim ke Dashboard dengan label resmi MANUAL PEIL SCHAAL.'}
           </p>
 
           <form onSubmit={handleSubmitManualPeil} className="space-y-4">
@@ -840,7 +1007,7 @@ export default function AdminPanel({
               <div className="flex items-center justify-between mb-2">
                 <label className={`text-[10px] font-mono font-bold uppercase tracking-wider ${themeLabel} flex items-center gap-1.5`}>
                   <Ruler className="w-3.5 h-3.5 text-amber-400" />
-                  Ketinggian Air Peil Schaal (TMA)
+                  {language === 'en' ? 'Peil Schaal Water Level (TMA)' : 'Ketinggian Air Peil Schaal (TMA)'}
                 </label>
                 <div className="flex items-center gap-2">
                   <span className={`px-2.5 py-0.5 rounded-md text-[10px] font-mono font-bold ${
@@ -851,10 +1018,10 @@ export default function AdminPanel({
                         : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                   }`}>
                     {manualTma >= (config?.threshold_bahaya || 90)
-                      ? 'STATUS: BAHAYA'
+                      ? (language === 'en' ? 'STATUS: DANGER' : 'STATUS: BAHAYA')
                       : manualTma >= (config?.threshold_siaga || 60)
-                        ? 'STATUS: SIAGA'
-                        : 'STATUS: NORMAL'}
+                        ? (language === 'en' ? 'STATUS: ALERT' : 'STATUS: SIAGA')
+                        : (language === 'en' ? 'STATUS: NORMAL' : 'STATUS: NORMAL')}
                   </span>
                   <span className="text-sm font-bold font-mono text-amber-400">
                     {manualTma} cm
@@ -875,12 +1042,12 @@ export default function AdminPanel({
 
               <div className="flex items-center justify-between gap-1.5 flex-wrap">
                 <div className="flex items-center gap-1.5">
-                  <span className={`text-[9px] font-mono ${themeLabel}`}>Preset Cepat:</span>
+                  <span className={`text-[9px] font-mono ${themeLabel}`}>{language === 'en' ? 'Quick Preset:' : 'Preset Cepat:'}</span>
                   {[
-                    { label: 'Normal (35cm)', val: 35 },
-                    { label: 'Waspada (65cm)', val: 65 },
-                    { label: 'Siaga (75cm)', val: 75 },
-                    { label: 'Bahaya (105cm)', val: 105 }
+                    { label: language === 'en' ? 'Normal (35cm)' : 'Normal (35cm)', val: 35 },
+                    { label: language === 'en' ? 'Watch (65cm)' : 'Waspada (65cm)', val: 65 },
+                    { label: language === 'en' ? 'Alert (75cm)' : 'Siaga (75cm)', val: 75 },
+                    { label: language === 'en' ? 'Danger (105cm)' : 'Bahaya (105cm)', val: 105 }
                   ].map((p) => (
                     <button
                       key={p.val}
@@ -897,7 +1064,8 @@ export default function AdminPanel({
                   ))}
                 </div>
                 <span className={`text-[9px] font-mono ${themeSubtext}`}>
-                  Ekuivalen jarak sensor: {Math.max(0, Math.round(((config?.reference_height || 300) - manualTma) * 10) / 10)} cm
+                  {language === 'en' ? 'Equivalent sensor gap: ' : 'Ekuivalen jarak sensor: '}
+                  {Math.max(0, Math.round(((config?.reference_height || 300) - manualTma) * 10) / 10)} cm
                 </span>
               </div>
             </div>
@@ -906,13 +1074,13 @@ export default function AdminPanel({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="flex flex-col gap-1.5">
                 <label className={`text-[9px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>
-                  Nama Petugas Lapangan
+                  {language === 'en' ? 'Field Operator Name' : 'Nama Petugas Lapangan'}
                 </label>
                 <input 
                   type="text" 
                   value={manualOperator}
                   onChange={(e) => setManualOperator(e.target.value)}
-                  placeholder="Nama petugas jaga"
+                  placeholder={language === 'en' ? 'Operator name' : 'Nama petugas jaga'}
                   required
                   className={`px-3 py-2 text-xs rounded-xl border ${
                     isDark 
@@ -924,7 +1092,7 @@ export default function AdminPanel({
 
               <div className="flex flex-col gap-1.5">
                 <label className={`text-[9px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>
-                  Alasan Pengamatan Manual
+                  {language === 'en' ? 'Reason for Manual Entry' : 'Alasan Pengamatan Manual'}
                 </label>
                 <select 
                   value={manualReason}
@@ -935,12 +1103,22 @@ export default function AdminPanel({
                       : 'bg-slate-50 border-slate-200 text-slate-800 focus:border-amber-500'
                   } outline-none transition-all`}
                 >
-                  <option value="Sensor Terhalang Sampah / Ranting">Sensor Terhalang Sampah / Ranting</option>
-                  <option value="Sensor Fisik Mati / Baterai Drop">Sensor Fisik Mati / Baterai Drop</option>
-                  <option value="Kabel Putus / Gangguan Sinyal">Kabel Putus / Gangguan Sinyal</option>
-                  <option value="Validasi Berkala Peil Schaal Fisik">Validasi Berkala Peil Schaal Fisik</option>
-                  <option value="Pemeliharaan & Kalibrasi Alat">Pemeliharaan & Kalibrasi Alat</option>
-                  <option value="Lainnya">Lainnya</option>
+                  <option value="Sensor Terhalang Sampah / Ranting">
+                    {language === 'en' ? 'Sensor Obstructed by Debris / Branches' : 'Sensor Terhalang Sampah / Ranting'}
+                  </option>
+                  <option value="Sensor Fisik Mati / Baterai Drop">
+                    {language === 'en' ? 'Sensor Power Loss / Low Battery' : 'Sensor Fisik Mati / Baterai Drop'}
+                  </option>
+                  <option value="Kabel Putus / Gangguan Sinyal">
+                    {language === 'en' ? 'Cable Cut / Signal Loss' : 'Kabel Putus / Gangguan Sinyal'}
+                  </option>
+                  <option value="Validasi Berkala Peil Schaal Fisik">
+                    {language === 'en' ? 'Periodic Staff Gauge Routine Calibration' : 'Validasi Berkala Peil Schaal Fisik'}
+                  </option>
+                  <option value="Pemeliharaan & Kalibrasi Alat">
+                    {language === 'en' ? 'Instrument Maintenance' : 'Pemeliharaan & Kalibrasi Alat'}
+                  </option>
+                  <option value="Lainnya">{language === 'en' ? 'Other' : 'Lainnya'}</option>
                 </select>
               </div>
             </div>
@@ -948,14 +1126,14 @@ export default function AdminPanel({
             {/* Weather Condition */}
             <div className="flex flex-col gap-1.5">
               <label className={`text-[9px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>
-                Kondisi Cuaca Lapangan Saat Pengamatan
+                {language === 'en' ? 'Field Weather Condition at Observation' : 'Kondisi Cuaca Lapangan Saat Pengamatan'}
               </label>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {[
-                  { label: 'Cerah Terik', icon: Sun },
-                  { label: 'Berawan / Teduh', icon: CloudRain },
-                  { label: 'Hujan Sedang', icon: CloudRain },
-                  { label: 'Hujan Deras / Badai', icon: AlertTriangle }
+                  { label: language === 'en' ? 'Sunny / Clear' : 'Cerah Terik', icon: Sun },
+                  { label: language === 'en' ? 'Cloudy / Overcast' : 'Berawan / Teduh', icon: CloudRain },
+                  { label: language === 'en' ? 'Moderate Rain' : 'Hujan Sedang', icon: CloudRain },
+                  { label: language === 'en' ? 'Heavy Rain / Storm' : 'Hujan Deras / Badai', icon: AlertTriangle }
                 ].map((item) => {
                   const Icon = item.icon;
                   const isSelected = manualWeather === item.label;
@@ -981,13 +1159,13 @@ export default function AdminPanel({
             {/* Visual Field Notes */}
             <div className="flex flex-col gap-1.5">
               <label className={`text-[9px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>
-                Catatan Lapangan & Karakteristik Air (Opsional)
+                {language === 'en' ? 'Field Notes & River Stream Dynamics (Optional)' : 'Catatan Lapangan & Karakteristik Air (Opsional)'}
               </label>
               <input 
                 type="text" 
                 value={manualNotes}
                 onChange={(e) => setManualNotes(e.target.value)}
-                placeholder="Contoh: Arus sangat deras, air keruh kecokelatan, banyak batang pisang hanyut"
+                placeholder={language === 'en' ? 'Example: Rapid stream, turbid brown water, floating debris' : 'Contoh: Arus sangat deras, air keruh kecokelatan, banyak batang pisang hanyut'}
                 className={`px-3 py-2 text-xs rounded-xl border ${
                   isDark 
                     ? 'bg-black/50 border-white/10 text-white focus:border-amber-400' 
@@ -1021,12 +1199,12 @@ export default function AdminPanel({
                 {isSubmittingManual ? (
                   <>
                     <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Menyimpan ke Sistem...</span>
+                    <span>{language === 'en' ? 'Saving to Database...' : 'Menyimpan ke Sistem...'}</span>
                   </>
                 ) : (
                   <>
                     <Send className="w-3.5 h-3.5" />
-                    <span>Kirim Data Peil Schaal ke Dashboard</span>
+                    <span>{language === 'en' ? 'Submit Staff Gauge Reading to Dashboard' : 'Kirim Data Peil Schaal ke Dashboard'}</span>
                   </>
                 )}
               </button>
@@ -1039,10 +1217,10 @@ export default function AdminPanel({
               <div className="flex items-center justify-between mb-2">
                 <span className={`text-[9px] font-mono font-bold uppercase tracking-wider ${themeLabel} flex items-center gap-1.5`}>
                   <History className="w-3 h-3 text-amber-400" />
-                  Riwayat Entri Peil Schaal Terakhir
+                  {language === 'en' ? 'Recent Peil Schaal Staff Gauge Logs' : 'Riwayat Entri Peil Schaal Terakhir'}
                 </span>
                 <span className={`text-[9px] font-mono ${themeSubtext}`}>
-                  {recentPeilEntries.length} entri tercatat
+                  {recentPeilEntries.length} {language === 'en' ? 'entries logged' : 'entri tercatat'}
                 </span>
               </div>
               <div className="space-y-1.5">
@@ -1062,11 +1240,11 @@ export default function AdminPanel({
                         TMA: {entry.water_level} cm
                       </span>
                       <span className={`text-[10px] ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
-                        {entry.operator || 'Petugas'}
+                        {entry.operator || (language === 'en' ? 'Operator' : 'Petugas')}
                       </span>
                     </div>
                     <span className={`text-[9px] ${themeSubtext}`}>
-                      {new Date(entry.timestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+                      {new Date(entry.timestamp).toLocaleTimeString(language === 'en' ? 'en-US' : 'id-ID', { hour: '2-digit', minute: '2-digit' })}
                     </span>
                   </div>
                 ))}
@@ -1082,7 +1260,9 @@ export default function AdminPanel({
               <div className={`p-2 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-150 border-slate-200'} rounded-lg text-indigo-500`}>
                 <Key className="w-4 h-4 text-indigo-500" />
               </div>
-              <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>Ubah Kredensial Administrator PLC</h3>
+              <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                {language === 'en' ? 'Change PLC Administrator Credentials' : 'Ubah Kredensial Administrator PLC'}
+              </h3>
             </div>
             <div className={`flex items-center gap-1.5 ${isDark ? 'bg-white/5 border-white/10 text-white/60' : 'bg-slate-100 border-slate-200 text-slate-600'} px-2.5 py-1 rounded text-[9px] font-mono tracking-widest uppercase`}>
               SECURITY KEY
@@ -1090,13 +1270,17 @@ export default function AdminPanel({
           </div>
 
           <p className={`text-[11px] ${themeSubtext} leading-relaxed mb-6`}>
-            Ubah nama pengguna (username) dan kata sandi (password) khusus yang digunakan untuk mengakses dan mengonfigurasi parameter PLC. Perubahan ini akan langsung disimpan di database Firestore secara aktual.
+            {language === 'en'
+              ? 'Update the dedicated username and password used to access and configure PLC parameters. Modifications are directly synchronized to Cloud Firestore.'
+              : 'Ubah nama pengguna (username) dan kata sandi (password) khusus yang digunakan untuk mengakses dan mengonfigurasi parameter PLC. Perubahan ini akan langsung disimpan di database Firestore secara aktual.'}
           </p>
 
           <form onSubmit={handleChangeCredentials} className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="flex flex-col gap-1.5">
-                <label className={`text-[9px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>Username Administrator Baru</label>
+                <label className={`text-[9px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>
+                  {language === 'en' ? 'New Administrator Username' : 'Username Administrator Baru'}
+                </label>
                 <input 
                   type="text" 
                   value={newUsername}
@@ -1111,7 +1295,9 @@ export default function AdminPanel({
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <label className={`text-[9px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>Password Saat Ini</label>
+                <label className={`text-[9px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>
+                  {language === 'en' ? 'Current Password' : 'Password Saat Ini'}
+                </label>
                 <input 
                   type="password" 
                   value={currentPassword}
@@ -1127,12 +1313,14 @@ export default function AdminPanel({
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <label className={`text-[9px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>Password Baru</label>
+                <label className={`text-[9px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>
+                  {language === 'en' ? 'New Password' : 'Password Baru'}
+                </label>
                 <input 
                   type="password" 
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="Min 6 karakter"
+                  placeholder={language === 'en' ? 'Min 6 characters' : 'Min 6 karakter'}
                   required
                   className={`px-3 py-2 text-xs rounded-xl border ${
                     isDark 
@@ -1143,12 +1331,14 @@ export default function AdminPanel({
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <label className={`text-[9px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>Konfirmasi Password Baru</label>
+                <label className={`text-[9px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>
+                  {language === 'en' ? 'Confirm New Password' : 'Konfirmasi Password Baru'}
+                </label>
                 <input 
                   type="password" 
                   value={confirmNewPassword}
                   onChange={(e) => setConfirmNewPassword(e.target.value)}
-                  placeholder="Sama dengan password baru"
+                  placeholder={language === 'en' ? 'Matches new password' : 'Sama dengan password baru'}
                   required
                   className={`px-3 py-2 text-xs rounded-xl border ${
                     isDark 
@@ -1173,7 +1363,9 @@ export default function AdminPanel({
                 disabled={isSavingCreds}
                 className="flex items-center justify-center gap-2 px-4 py-2.5 bg-[#3B82F6] hover:bg-blue-600 disabled:opacity-50 text-black text-xs font-bold rounded-xl cursor-pointer transition-all"
               >
-                {isSavingCreds ? 'Memproses...' : 'Ubah Kredensial'}
+                {isSavingCreds 
+                  ? (language === 'en' ? 'Processing...' : 'Memproses...') 
+                  : (language === 'en' ? 'Update Credentials' : 'Ubah Kredensial')}
               </button>
             </div>
           </form>
@@ -1188,7 +1380,9 @@ export default function AdminPanel({
         <div id="sim-engine" className={`${themeCard} rounded-2xl p-6 relative flex flex-col justify-between`}>
           <div>
             <div className="flex justify-between items-center mb-4">
-              <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeLabel} font-mono`}>Simulator Skenario Hidrologi</span>
+              <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeLabel} font-mono`}>
+                {language === 'en' ? 'Hydrological Scenario Simulator' : 'Simulator Skenario Hidrologi'}
+              </span>
               <div className="flex items-center gap-2">
                 <span className={`text-[9px] ${themeLabel} font-mono uppercase tracking-wider`}>Mode:</span>
                 <span className={`w-2 h-2 rounded-full ${autoSim ? 'bg-[#3B82F6] animate-ping' : 'bg-emerald-500'}`} />
@@ -1196,10 +1390,12 @@ export default function AdminPanel({
             </div>
 
             <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'} leading-tight mb-2`}>
-              Simulasi Siklus Ketinggian Air
+              {language === 'en' ? 'Water Level Simulation & Scenarios' : 'Simulasi Siklus Ketinggian Air'}
             </h3>
             <p className={`text-[11px] ${themeSubtext} leading-relaxed mb-5`}>
-              Modul kontrol pengujian perilaku sistem dari kondisi Normal hingga Bahaya. Seluruh alur terikat pada proteksi kuota database dan berhenti otomatis saat status puncak tercapai.
+              {language === 'en'
+                ? 'Test system behaviors across Normal, Alert, and Danger states. You can set conditions directly, run automated flood scenarios, or reset back to live ESP32 hardware telemetry.'
+                : 'Modul kontrol pengujian perilaku sistem dari kondisi Normal hingga Bahaya. Anda dapat mengatur kondisi secara langsung, menjalankan skenario kenaikan air bertahap, atau me-reset kembali ke data telemetri riil dari ESP32.'}
             </p>
 
             {/* TELEMETRY SOURCE MODE SELECTOR */}
@@ -1216,12 +1412,18 @@ export default function AdminPanel({
                   <span className={`text-[11px] font-mono uppercase tracking-wider font-bold block ${
                     autoSim ? 'text-[#3B82F6]' : 'text-emerald-500'
                   }`}>
-                    {autoSim ? 'STATUS: GENERATOR SIMULASI AKTIF' : 'STATUS: STANDBY (MENUNGGU HARDWARE ESP32)'}
+                    {autoSim 
+                      ? (language === 'en' ? 'STATUS: SIMULATOR ENGINE ACTIVE' : 'STATUS: GENERATOR SIMULASI AKTIF') 
+                      : (language === 'en' ? 'STATUS: STANDBY (AWAITING ESP32)' : 'STATUS: STANDBY (MENUNGGU HARDWARE ESP32)')}
                   </span>
                   <p className={`text-[10px] ${themeSubtext} leading-normal mt-0.5 max-w-xs`}>
                     {autoSim 
-                      ? 'Ketinggian air digenerate berkala untuk keperluan demonstrasi sistem.'
-                      : 'Simulator otomatis dinonaktifkan. Sistem dalam mode pasif menunggu paket transmisi telemetri asli dari ESP32.'}
+                      ? (language === 'en' 
+                          ? 'Water elevation is simulated periodically for system demonstration.' 
+                          : 'Ketinggian air digenerate berkala untuk keperluan demonstrasi sistem.')
+                      : (language === 'en'
+                          ? 'Simulator is idle. System is passively listening for real ESP32 packet transmissions.'
+                          : 'Simulator otomatis dinonaktifkan. Sistem dalam mode pasif menunggu paket transmisi telemetri asli dari ESP32.')}
                   </p>
                 </div>
               </div>
@@ -1235,17 +1437,90 @@ export default function AdminPanel({
                     : 'bg-[#3B82F6] hover:bg-blue-600 text-black border-[#3B82F6]'
                 }`}
               >
-                {autoSim ? 'Alihkan ke Standby Hardware' : 'Aktifkan Generator Otomatis'}
+                {autoSim 
+                  ? (language === 'en' ? 'Switch to Hardware Standby' : 'Alihkan ke Standby Hardware') 
+                  : (language === 'en' ? 'Enable Auto Simulator' : 'Aktifkan Generator Otomatis')}
               </button>
             </div>
 
+            {/* DIRECT CONDITION INJECTOR: SET KONDISI & TERAPKAN */}
+            <div className={`p-4 rounded-xl border mb-5 ${isDark ? 'bg-black/30 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Sliders className="w-4 h-4 text-amber-400" />
+                  <span className={`text-[10px] font-mono font-bold uppercase tracking-wider ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
+                    {language === 'en' ? 'Set Condition & Apply' : 'Set Kondisi & Terapkan'}
+                  </span>
+                </div>
+                <span className={`text-[10px] font-mono font-bold ${
+                  simTargetLevel >= (config?.threshold_bahaya || 90)
+                    ? 'text-rose-400'
+                    : simTargetLevel >= (config?.threshold_siaga || 60)
+                      ? 'text-amber-400'
+                      : 'text-emerald-400'
+                }`}>
+                  {simTargetLevel} cm ({
+                    simTargetLevel >= (config?.threshold_bahaya || 90)
+                      ? (language === 'en' ? 'DANGER' : 'BAHAYA')
+                      : simTargetLevel >= (config?.threshold_siaga || 60)
+                        ? (language === 'en' ? 'ALERT' : 'SIAGA')
+                        : (language === 'en' ? 'NORMAL' : 'NORMAL')
+                  })
+                </span>
+              </div>
+
+              {/* Presets */}
+              <div className="grid grid-cols-3 gap-2 mb-3">
+                {[
+                  { label: language === 'en' ? 'Normal (35cm)' : 'Normal (35cm)', val: 35, color: 'text-emerald-400 border-emerald-500/30' },
+                  { label: language === 'en' ? 'Alert (75cm)' : 'Siaga (75cm)', val: 75, color: 'text-amber-400 border-amber-500/30' },
+                  { label: language === 'en' ? 'Danger (105cm)' : 'Bahaya (105cm)', val: 105, color: 'text-rose-400 border-rose-500/30' },
+                ].map((item) => (
+                  <button
+                    key={item.val}
+                    type="button"
+                    onClick={() => setSimTargetLevel(item.val)}
+                    className={`py-1.5 px-2 rounded-lg text-[10px] font-mono font-bold border transition-all cursor-pointer ${
+                      simTargetLevel === item.val
+                        ? 'bg-amber-400 text-black border-amber-300 font-extrabold shadow-sm'
+                        : `${isDark ? 'bg-white/5 text-slate-300' : 'bg-white text-slate-700'} hover:border-amber-400/50`
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Slider */}
+              <input
+                type="range"
+                min="10"
+                max="150"
+                value={simTargetLevel}
+                onChange={(e) => setSimTargetLevel(Number(e.target.value))}
+                className="w-full accent-amber-400 cursor-pointer h-1.5 bg-black/40 rounded-lg mb-3"
+              />
+
+              <div>
+                <button
+                  type="button"
+                  onClick={() => handleApplyCondition(simTargetLevel, true)}
+                  disabled={isApplyingCondition}
+                  className="w-full py-2.5 px-4 bg-amber-400 hover:bg-amber-500 text-black text-xs font-bold rounded-xl cursor-pointer disabled:opacity-50 transition-all flex items-center justify-center gap-1.5 shadow-sm"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>{language === 'en' ? 'Apply Condition & View Dashboard' : 'Terapkan Kondisi & Buka Dashboard'}</span>
+                </button>
+              </div>
+            </div>
+
             {/* SCENARIO RUNNER: NORMAL TO HIGH FLOOD */}
-            <div className={`p-5 rounded-xl border ${isDark ? 'bg-black/40 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
+            <div className={`p-4 rounded-xl border mb-5 ${isDark ? 'bg-black/40 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
                   <Activity className="w-4 h-4 text-[#3B82F6]" />
                   <span className={`text-[10px] font-mono font-bold uppercase tracking-wider ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
-                    Skenario Kenaikan Air (Normal Ke Bahaya)
+                    {language === 'en' ? 'Water Rise Scenario (Normal -> Danger)' : 'Skenario Kenaikan Air (Normal Ke Bahaya)'}
                   </span>
                 </div>
 
@@ -1255,41 +1530,75 @@ export default function AdminPanel({
                     : 'bg-slate-500/10 text-slate-400 border border-white/5'
                 }`}>
                   <span className={`w-1.5 h-1.5 rounded-full ${isScenarioRunning ? 'bg-amber-400' : 'bg-slate-400'}`} />
-                  {isScenarioRunning ? 'SEDANG BERJALAN' : 'DIJEDA / SIAP'}
+                  {isScenarioRunning 
+                    ? (language === 'en' ? 'RUNNING' : 'SEDANG BERJALAN') 
+                    : (language === 'en' ? 'IDLE / READY' : 'DIJEDA / SIAP')}
                 </span>
               </div>
 
-              <p className={`text-[10px] ${themeSubtext} leading-relaxed mb-4`}>
-                Sensor menaikkan pembacaan secara terukur dari level <strong>Normal</strong>, melintasi <strong>Siaga</strong>, hingga mencapai <strong>Bahaya (&gt;90 cm)</strong>. Begitu ambang batas bahaya tercapai, skenario <strong>berhenti otomatis</strong> pada laporan terakhir tanpa penulisan data berulang ke database.
+              <p className={`text-[10px] ${themeSubtext} leading-relaxed mb-3`}>
+                {language === 'en'
+                  ? 'Sensor reading increases progressively through Normal, Alert, and Danger (>90cm), then automatically pauses.'
+                  : 'Sensor menaikkan pembacaan secara bertahap dari Normal, Siaga, hingga Bahaya (>90 cm) dan otomatis berhenti.'}
               </p>
 
-              <div className="flex items-center gap-3">
+              <div className="flex flex-col sm:flex-row items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => handleStartScenario('heavy_rain_flood')}
+                  onClick={() => handleStartScenario('heavy_rain_flood', true)}
                   disabled={isScenarioRunning}
-                  className="flex-1 py-2.5 px-4 bg-[#3B82F6] hover:bg-blue-600 text-black font-bold text-xs rounded-xl cursor-pointer disabled:opacity-50 transition-all flex items-center justify-center gap-2 shadow-sm"
+                  className="w-full sm:flex-1 py-2 px-3 bg-[#3B82F6] hover:bg-blue-600 text-black font-bold text-xs rounded-xl cursor-pointer disabled:opacity-50 transition-all flex items-center justify-center gap-1.5 shadow-sm"
                 >
                   <Play className="w-3.5 h-3.5 fill-current" />
-                  <span>Mulai Simulasi Kenaikan Air</span>
+                  <span>{language === 'en' ? 'Start Scenario & View Dashboard' : 'Mulai Simulasi & Buka Dashboard'}</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={handleStopScenario}
                   disabled={!isScenarioRunning}
-                  className="py-2.5 px-4 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-white font-bold text-xs rounded-xl cursor-pointer transition-all border border-white/10 flex items-center gap-2"
+                  className="w-full sm:w-auto py-2 px-3 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-white font-bold text-xs rounded-xl cursor-pointer transition-all border border-white/10 flex items-center justify-center gap-1.5"
                 >
                   <Square className="w-3.5 h-3.5 fill-current" />
-                  <span>Hentikan / Jeda</span>
+                  <span>{language === 'en' ? 'Stop' : 'Hentikan'}</span>
                 </button>
               </div>
             </div>
+
+            {/* INSTANT RESET BUTTON: REVERT TO REAL ESP DATA */}
+            <div className={`p-4 rounded-xl border ${isDark ? 'bg-rose-950/15 border-rose-500/25' : 'bg-rose-50 border-rose-200'}`}>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <RotateCcw className="w-4 h-4 text-rose-500 animate-spin-reverse" />
+                  <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-rose-500">
+                    {language === 'en' ? 'Reset Simulation to Real ESP32 Data' : 'Reset Simulasi ke Data Real ESP32'}
+                  </span>
+                </div>
+              </div>
+              <p className={`text-[10px] ${themeSubtext} leading-relaxed mb-3`}>
+                {language === 'en'
+                  ? 'Clears simulator data from the database. If ESP32 hardware is sending data, it immediately reflects real readings. If ESP32 is offline, the dashboard reverts to "-- cm" (OFFLINE) so no false flood alarms occur.'
+                  : 'Menghapus data simulasi seketika dari database. Jika ESP32 aktif, data riil langsung tampil. Jika ESP32 offline, status kembali ke "-- cm" (OFFLINE) tanpa membuat orang panik / salah paham.'}
+              </p>
+              <div>
+                <button
+                  type="button"
+                  onClick={() => handleResetAllSimulation(true)}
+                  disabled={isResettingSim}
+                  className="w-full py-2.5 px-4 bg-rose-500 hover:bg-rose-600 disabled:opacity-50 text-white font-bold text-xs rounded-xl cursor-pointer transition-all flex items-center justify-center gap-2 shadow-sm"
+                >
+                  <RotateCcw className={`w-3.5 h-3.5 ${isResettingSim ? 'animate-spin' : ''}`} />
+                  <span>{language === 'en' ? 'RESET SIMULATION & RETURN TO ESP32' : 'RESET SIMULASI KE DATA REAL ESP'}</span>
+                </button>
+              </div>
+            </div>
+
           </div>
 
           <div className="mt-5 pt-4 border-t border-white/5 flex items-center justify-between text-[10px] font-mono text-slate-500">
             <span className="flex items-center gap-1.5">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" /> Proteksi Kuota Database Aktif
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
+              {language === 'en' ? 'Database Quota Protection Active' : 'Proteksi Kuota Database Aktif'}
             </span>
             <span>Auto-Terminasi: &gt;90 cm</span>
           </div>
@@ -1301,14 +1610,18 @@ export default function AdminPanel({
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <Terminal className="w-4 h-4 text-[#3B82F6] animate-pulse" />
-                <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeLabel} font-mono`}>Terminal Konsol RTU SIMBA</span>
+                <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeLabel} font-mono`}>
+                  {language === 'en' ? 'SIMBA RTU Console Terminal' : 'Terminal Konsol RTU SIMBA'}
+                </span>
               </div>
               <span className={`text-[9px] ${themeLabel} font-mono`}>baud 115200</span>
             </div>
 
             <div className="bg-black/95 rounded-xl p-3.5 h-48 overflow-y-auto font-mono text-[10px] border border-white/5 space-y-2">
               {deviceLogs.length === 0 ? (
-                <div className="text-white/20 text-center py-14 uppercase tracking-widest text-[9px]">Tidak ada log terbaru. Memulai simulator...</div>
+                <div className="text-white/20 text-center py-14 uppercase tracking-widest text-[9px]">
+                  {language === 'en' ? 'No recent logs. Initializing simulator...' : 'Tidak ada log terbaru. Memulai simulator...'}
+                </div>
               ) : (
                 deviceLogs.map((log) => {
                   let badgeColor = 'text-[#3B82F6] bg-[#3B82F6]/5 border-white/10';
@@ -1317,7 +1630,9 @@ export default function AdminPanel({
                   
                   return (
                     <div key={log.id} className="flex items-start gap-2 border-b border-white/5 pb-1.5 last:border-0">
-                      <span className="text-white/30 select-none">[{new Date(log.timestamp).toLocaleTimeString('id-ID')}]</span>
+                      <span className="text-white/30 select-none">
+                        [{new Date(log.timestamp).toLocaleTimeString(language === 'en' ? 'en-US' : 'id-ID')}]
+                      </span>
                       <span className={`px-1 py-0.25 rounded text-[8px] uppercase border shrink-0 ${badgeColor}`}>{log.source}</span>
                       <span className="text-white/70 leading-normal">{log.message}</span>
                     </div>
@@ -1338,10 +1653,12 @@ export default function AdminPanel({
                 </div>
                 <div>
                   <h3 className={`font-bold text-lg ${isDark ? 'text-white' : 'text-slate-800'} leading-tight`}>
-                    Inspektor Batch Telemetri ESP32
+                    {language === 'en' ? 'ESP32 Batch Telemetry Inspector' : 'Inspektor Batch Telemetri ESP32'}
                   </h3>
                   <p className={`font-mono text-[9px] uppercase tracking-wider ${themeLabel} mt-0.5`}>
-                    1 Dokumen Firestore = Array 360 Titik Sampel (Bebas Quota Spike)
+                    {language === 'en'
+                      ? '1 Firestore Document = 360 Sample Array (Zero Spike)'
+                      : '1 Dokumen Firestore = Array 360 Titik Sampel (Bebas Quota Spike)'}
                   </p>
                 </div>
               </div>
@@ -1351,38 +1668,54 @@ export default function AdminPanel({
                 const batchCount = rawBatch.length || (latestReading as any)?.samples_count || 0;
                 return (
                   <span className="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/25 rounded-lg text-[10px] font-mono text-emerald-400 font-bold shrink-0">
-                    {batchCount > 0 ? `${batchCount} TITIK` : '360 SAMPEL/BATCH'}
+                    {batchCount > 0 
+                      ? `${batchCount} ${language === 'en' ? 'POINTS' : 'TITIK'}` 
+                      : (language === 'en' ? '360 SAMPLES/BATCH' : '360 SAMPEL/BATCH')}
                   </span>
                 );
               })()}
             </div>
 
             {/* Status & Quota Efficiency Specs */}
-            <div className={`${isDark ? 'bg-black/60 border border-white/5' : 'bg-slate-50 border border-slate-200'} rounded-xl p-4 font-mono text-xs space-y-2.5`}>
+            <div className={`${isDark ? 'bg-black/60 border border-white/5' : 'bg-slate-50 border-slate-200'} rounded-xl p-4 font-mono text-xs space-y-2.5`}>
               <div className="flex items-center justify-between border-b border-white/5 pb-2">
-                <span className={`${themeLabel} text-[10px] uppercase`}>Status Data:</span>
+                <span className={`${themeLabel} text-[10px] uppercase`}>
+                  {language === 'en' ? 'Data Status:' : 'Status Data:'}
+                </span>
                 <span className="text-emerald-400 font-bold text-right">{timeAgoText} (STANDBY PAUSED)</span>
               </div>
 
               <div className="flex items-center justify-between border-b border-white/5 pb-2">
-                <span className={`${themeLabel} text-[10px] uppercase`}>Sumber Terkini:</span>
+                <span className={`${themeLabel} text-[10px] uppercase`}>
+                  {language === 'en' ? 'Active Source:' : 'Sumber Terkini:'}
+                </span>
                 <span className="text-[#3B82F6] font-bold">{latestReading?.source || 'Hardware-ESP32-Batch'}</span>
               </div>
 
               <div className="flex items-center justify-between border-b border-white/5 pb-2">
-                <span className={`${themeLabel} text-[10px] uppercase`}>Struktur Payload:</span>
-                <span className="text-[#3B82F6] font-bold">Array tunggal [ [Waktu, TMA] / Jarak ]</span>
+                <span className={`${themeLabel} text-[10px] uppercase`}>
+                  {language === 'en' ? 'Payload Structure:' : 'Struktur Payload:'}
+                </span>
+                <span className="text-[#3B82F6] font-bold">
+                  {language === 'en' ? 'Single Array [ [Time, TMA] / Distance ]' : 'Array tunggal [ [Waktu, TMA] / Jarak ]'}
+                </span>
               </div>
 
               <div className="flex items-center justify-between border-b border-white/5 pb-2">
-                <span className={`${themeLabel} text-[10px] uppercase`}>Efisiensi Write DB:</span>
-                <span className="text-emerald-400 font-bold">1 Write / 6 Menit (Hemat 99.7%)</span>
+                <span className={`${themeLabel} text-[10px] uppercase`}>
+                  {language === 'en' ? 'DB Write Efficiency:' : 'Efisiensi Write DB:'}
+                </span>
+                <span className="text-emerald-400 font-bold">
+                  {language === 'en' ? '1 Write / 6 Minutes (99.7% Quota Saved)' : '1 Write / 6 Menit (Hemat 99.7%)'}
+                </span>
               </div>
 
               {/* Structure code sample preview */}
               <div className="pt-1">
                 <span className={`${themeLabel} text-[9px] uppercase tracking-wider block mb-1.5`}>
-                  Preview Struktur Data Aktual (360 Sampel):
+                  {language === 'en'
+                    ? 'Actual Data Structure Preview (360 Samples):'
+                    : 'Preview Struktur Data Aktual (360 Sampel):'}
                 </span>
                 <pre className={`p-2.5 rounded-lg font-mono text-[10px] leading-relaxed overflow-x-auto ${isDark ? 'bg-black/80 text-emerald-300 border border-white/5' : 'bg-slate-200/80 text-emerald-800'}`}>
 {(() => {
@@ -1391,19 +1724,19 @@ export default function AdminPanel({
     const fmt = (item: any) => {
       if (Array.isArray(item)) return `  [ "${item[0]}", ${item[1]} ]`;
       if (item && typeof item === 'object') {
-        const ts = item.timestamp ? new Date(item.timestamp < 10000000000 ? item.timestamp * 1000 : item.timestamp).toLocaleTimeString('id-ID') : '--';
+        const ts = item.timestamp ? new Date(item.timestamp < 10000000000 ? item.timestamp * 1000 : item.timestamp).toLocaleTimeString(language === 'en' ? 'en-US' : 'id-ID') : '--';
         const dist = typeof item.distance === 'number' ? `${item.distance.toFixed(1)} cm` : '--';
         return `  { "time": "${ts}", "distance": ${dist} }`;
       }
       return `  ${JSON.stringify(item)}`;
     };
-    return `[\n${fmt(rawBatch[0])},\n${fmt(rawBatch[1])},\n  ... ${rawBatch.length - 2} data sampel lainnya ...\n${fmt(rawBatch[rawBatch.length - 1])}\n]`;
+    return `[\n${fmt(rawBatch[0])},\n${fmt(rawBatch[1])},\n  ... ${rawBatch.length - 2} ${language === 'en' ? 'more samples' : 'data sampel lainnya'} ...\n${fmt(rawBatch[rawBatch.length - 1])}\n]`;
   }
   return `[
-  [ "${latestReading ? new Date(latestReading.timestamp - 360000).toLocaleTimeString('id-ID') : '16:00:00'}", 230 ],
-  [ "${latestReading ? new Date(latestReading.timestamp - 359000).toLocaleTimeString('id-ID') : '16:00:01'}", 231 ],
-  ... 356 data sampel lainnya ...
-  [ "${latestReading ? new Date(latestReading.timestamp).toLocaleTimeString('id-ID') : '16:05:59'}", 234 ]
+  [ "${latestReading ? new Date(latestReading.timestamp - 360000).toLocaleTimeString(language === 'en' ? 'en-US' : 'id-ID') : '16:00:00'}", 230 ],
+  [ "${latestReading ? new Date(latestReading.timestamp - 359000).toLocaleTimeString(language === 'en' ? 'en-US' : 'id-ID') : '16:00:01'}", 231 ],
+  ... 356 ${language === 'en' ? 'more samples' : 'data sampel lainnya'} ...
+  [ "${latestReading ? new Date(latestReading.timestamp).toLocaleTimeString(language === 'en' ? 'en-US' : 'id-ID') : '16:05:59'}", 234 ]
 ]`;
 })()}
                 </pre>
@@ -1416,7 +1749,7 @@ export default function AdminPanel({
               <Database className="w-3.5 h-3.5 text-[#3B82F6]" />
               <span>POST /api/telemetry/batch</span>
             </span>
-            <span className="text-emerald-400 font-semibold">Terkoneksi</span>
+            <span className="text-emerald-400 font-semibold">{language === 'en' ? 'Connected' : 'Terkoneksi'}</span>
           </div>
         </div>
 
