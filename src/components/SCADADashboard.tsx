@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { db, handleFirestoreError, OperationType } from '../firebaseConfig';
+import { db, firebaseConfigured, handleFirestoreError, OperationType } from '../firebaseConfig';
 import { collection, query, orderBy, limit, onSnapshot, doc, getDocs, where } from 'firebase/firestore';
 import { 
   SensorReading, 
@@ -144,6 +144,7 @@ export default function SCADADashboard({
   prefPushSiaga = true,
   prefPushBahaya = true,
   onNavigateTab,
+  onEnterSimulation,
   onLatestReadingChange,
   language = 'id',
   soundEnabled: propSoundEnabled,
@@ -157,6 +158,7 @@ export default function SCADADashboard({
   prefPushSiaga?: boolean;
   prefPushBahaya?: boolean;
   onNavigateTab?: (tab: 'dashboard' | 'admin') => void;
+  onEnterSimulation?: () => void;
   onLatestReadingChange?: (reading: SensorReading | null) => void;
   language?: 'id' | 'en';
   soundEnabled?: boolean;
@@ -422,6 +424,12 @@ export default function SCADADashboard({
 
   // Bind real-time Firestore listeners for readings, predictions, BMKG data and config
   useEffect(() => {
+    if (!firebaseConfigured || !db) {
+      setHasReceivedReadingsSnapshot(true);
+      setIsLoading(false);
+      setIsDeviceOffline(true);
+      return;
+    }
     // 1. Listen for recent sensor readings (last 20 documents for ultra-low quota footprint)
     const unsubscribeReadings = onSnapshot(
       getFirestoreQuery('sensor_readings', 20),
@@ -924,6 +932,10 @@ export default function SCADADashboard({
 
   // CSV Data Export Handler (queries last 24 hours of sensor logs from Firestore)
   const handleExportCSV = async () => {
+    if (!firebaseConfigured || !db) {
+      setExportNotice(language === 'en' ? 'Firebase is not configured in this local environment.' : 'Firebase belum dikonfigurasi pada lingkungan lokal ini.');
+      return;
+    }
     setIsExportingCSV(true);
     setExportNotice(null);
     try {
@@ -1384,7 +1396,7 @@ export default function SCADADashboard({
               </div>
               <button 
                 id="btn-sync-weather"
-                onClick={fetchLiveWeather}
+                onClick={() => fetchLiveWeather()}
                 disabled={loadingWeather}
                 className={`p-1.5 rounded-lg border transition-all ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300 border-white/10' : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-700'}`}
                 title={language === 'en' ? 'Synchronize Live Weather Data' : 'Sinkronisasi Data Cuaca Terkini'}
@@ -1713,6 +1725,16 @@ export default function SCADADashboard({
                     )}
                     <span>{language === 'en' ? 'Test Chart (Sample 35 cm)' : 'Uji Grafik (Sampel 35 cm)'}</span>
                   </button>
+                  {onEnterSimulation && (
+                    <button
+                      type="button"
+                      onClick={onEnterSimulation}
+                      className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-black transition-all shadow-md cursor-pointer"
+                    >
+                      <Activity className="w-3.5 h-3.5" />
+                      <span>{language === 'en' ? 'Enter Simulation Mode' : 'Masuk Mode Simulasi'}</span>
+                    </button>
+                  )}
                   {onNavigateTab && (
                     <button
                       type="button"

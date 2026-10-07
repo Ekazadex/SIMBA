@@ -6,14 +6,41 @@
 import { initializeApp } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import firebaseConfig from '../firebase-applet-config.json';
 
-const app = initializeApp(firebaseConfig);
-export const db = (firebaseConfig as any).firestoreDatabaseId 
-  ? getFirestore(app, (firebaseConfig as any).firestoreDatabaseId) 
-  : getFirestore(app);
-export const auth = getAuth(app);
-export const googleProvider = new GoogleAuthProvider();
+type FirebaseRuntimeConfig = {
+  apiKey?: string;
+  authDomain?: string;
+  projectId?: string;
+  storageBucket?: string;
+  messagingSenderId?: string;
+  appId?: string;
+  firestoreDatabaseId?: string;
+  [key: string]: unknown;
+};
+
+const bundledConfigModules = import.meta.glob('/firebase-applet-config.json', { eager: true, import: 'default' }) as Record<string, FirebaseRuntimeConfig>;
+const bundledConfig = Object.values(bundledConfigModules)[0] ?? {};
+const firebaseConfig: FirebaseRuntimeConfig = {
+  ...bundledConfig,
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || bundledConfig.apiKey,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || bundledConfig.authDomain,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || bundledConfig.projectId,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || bundledConfig.storageBucket,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || bundledConfig.messagingSenderId,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || bundledConfig.appId,
+  firestoreDatabaseId: import.meta.env.VITE_FIRESTORE_DATABASE_ID || bundledConfig.firestoreDatabaseId,
+};
+
+const firebaseConfigured = Boolean(firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId);
+const app = firebaseConfigured ? initializeApp(firebaseConfig) : null;
+export const db = firebaseConfigured && app
+  ? ((firebaseConfig as any).firestoreDatabaseId
+    ? getFirestore(app, (firebaseConfig as any).firestoreDatabaseId)
+    : getFirestore(app))
+  : null as any;
+export const auth = firebaseConfigured && app ? getAuth(app) : ({ currentUser: null } as any);
+export const googleProvider = firebaseConfigured ? new GoogleAuthProvider() : (null as any);
+export { firebaseConfigured };
 
 export enum OperationType {
   CREATE = 'create',

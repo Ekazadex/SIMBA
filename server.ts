@@ -8,9 +8,12 @@ import path from 'path';
 import fs from 'fs';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
+import { createSocket } from 'node:dgram';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, addDoc, getDocs, query, orderBy, limit, setDoc, doc, onSnapshot, deleteDoc, where } from 'firebase/firestore';
+import { createCiliwungEngine } from './backend/ciliwung/simulation-engine.mjs';
+import { registerCiliwungRoutes } from './backend/ciliwung/ciliwung-api.mjs';
 
 dotenv.config();
 
@@ -18,29 +21,87 @@ const PORT = 3000;
 const app = express();
 app.use(express.json());
 
+// Localhost-only CORS allows the standalone 3D viewer on port 8765 to consume
+// the low-I/O Ciliwung SSE stream without exposing the simulation API publicly.
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (typeof origin === 'string' && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  return next();
+});
+
+const cupCarbonSocket = createSocket('udp4');
+const ciliwungEngine = createCiliwungEngine({ intervalMs: 500 });
+const ciliwungRoutes = registerCiliwungRoutes(app, {
+  engine: ciliwungEngine,
+  sendCupCarbon: (state) => {
+    for (const node of state.cupNodes) {
+      const command = Buffer.from(JSON.stringify({
+        type: 'node_update',
+        runId: state.runId,
+        nodeId: node.id,
+        cupcarbonNodeId: node.cupcarbonNodeId,
+        tmaCm: node.tmaCm,
+        status: node.status,
+        simTimeSeconds: state.simTimeSeconds,
+      }));
+      cupCarbonSocket.send(command, node.controlPort, '127.0.0.1');
+    }
+  },
+});
+cupCarbonSocket.unref();
+
+process.on('exit', () => {
+  ciliwungRoutes.unsubscribe();
+  try {
+    cupCarbonSocket.close();
+  } catch {
+    // Socket may never have been bound when no scenario was started.
+  }
+});
+
 // 1. Initialize Firebase inside Node using credentials from the applet config file
 const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
 let firebaseConfig: any = {};
 if (fs.existsSync(configPath)) {
   firebaseConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 } else {
-  console.warn('Warning: firebase-applet-config.json not found. Database features may fail.');
+  firebaseConfig = {
+    apiKey: process.env.VITE_FIREBASE_API_KEY,
+    authDomain: process.env.VITE_FIREBASE_AUTH_DOMAIN,
+    projectId: process.env.VITE_FIREBASE_PROJECT_ID,
+    appId: process.env.VITE_FIREBASE_APP_ID,
+    firestoreDatabaseId: process.env.VITE_FIRESTORE_DATABASE_ID,
+  };
+  console.warn('Warning: firebase-applet-config.json not found. Database features are disabled until Firebase configuration is provided.');
 }
 
-const firebaseApp = initializeApp(firebaseConfig);
-const db = firebaseConfig.firestoreDatabaseId
-  ? getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId)
-  : getFirestore(firebaseApp);
+const firebaseConfigured = Boolean(firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId);
+let firebaseApp: any = null;
+let db: any = null;
+if (firebaseConfigured) {
+  firebaseApp = initializeApp(firebaseConfig);
+  db = firebaseConfig.firestoreDatabaseId
+    ? getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId)
+    : getFirestore(firebaseApp);
+} else {
+  console.warn('[Server] Ciliwung simulation API can run without Firebase; hardware persistence is disabled.');
+}
 
 // 2. Initialize Gemini API Client
-const ai = new GoogleGenAI({
+const ai = process.env.GEMINI_API_KEY ? new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
   httpOptions: {
     headers: {
       'User-Agent': 'aistudio-build',
     },
   },
-});
+}) : null;
 
 // Default Node ID for our single-node SCADA prototipe
 const DEFAULT_NODE_ID = 'node-kukusan-01';
@@ -64,19 +125,21 @@ let manualScenarioRunning = false;
 let manualScenarioTimer: NodeJS.Timeout | null = null;
 
 // Real-time listener to keep currentConfig in sync without database read polling delays or race conditions
-onSnapshot(doc(db, 'system_config', DEFAULT_NODE_ID), (snapshot) => {
-  if (snapshot.exists()) {
-    currentConfig = { ...currentConfig, ...snapshot.data() } as any;
-    console.log('[Server] Real-time config synced:', currentConfig);
-  } else {
-    // Seed initial config if missing
-    setDoc(doc(db, 'system_config', DEFAULT_NODE_ID), currentConfig).catch((err) => {
-      console.error('[Server] Failed to seed initial config:', err);
-    });
-  }
-}, (error) => {
-  console.error('[Server] Error listening to config changes:', error);
-});
+if (db) {
+  onSnapshot(doc(db, 'system_config', DEFAULT_NODE_ID), (snapshot) => {
+    if (snapshot.exists()) {
+      currentConfig = { ...currentConfig, ...snapshot.data() } as any;
+      console.log('[Server] Real-time config synced:', currentConfig);
+    } else {
+      // Seed initial config if missing
+      setDoc(doc(db, 'system_config', DEFAULT_NODE_ID), currentConfig).catch((err) => {
+        console.error('[Server] Failed to seed initial config:', err);
+      });
+    }
+  }, (error) => {
+    console.error('[Server] Error listening to config changes:', error);
+  });
+}
 
 // Sound velocity correction based on temperature (Celsius)
 function getCorrectedWaterLevel(rawDistance: number, temp: number, refHeight: number): number {

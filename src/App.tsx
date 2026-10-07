@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { db, auth, googleProvider, handleFirestoreError, OperationType } from './firebaseConfig';
+import { db, auth, googleProvider, firebaseConfigured, handleFirestoreError, OperationType } from './firebaseConfig';
 import { 
   onAuthStateChanged, 
   signInWithPopup, 
@@ -23,6 +23,7 @@ import {
 import { SystemConfig, SensorReading } from './types';
 import SCADADashboard from './components/SCADADashboard';
 import AdminPanel from './components/AdminPanel';
+import CiliwungSimulationPage from './components/CiliwungSimulationPage';
 import { 
   LayoutDashboard, 
   Sliders, 
@@ -46,7 +47,7 @@ import {
 const NODE_ID = 'node-kukusan-01';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'admin'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'admin' | 'simulation'>('dashboard');
   const [user, setUser] = useState<any>(null);
   const [isSimulatedUser, setIsSimulatedUser] = useState(false);
   const [config, setConfig] = useState<SystemConfig | null>(null);
@@ -151,6 +152,7 @@ export default function App() {
 
   // Sync real-time admin credentials from Firestore with auto-migration from legacy 'admin123'
   useEffect(() => {
+    if (!firebaseConfigured || !db) return;
     const credRef = doc(db, 'admin_auth', 'credentials');
     const unsubscribe = onSnapshot(credRef, (docSnap) => {
       if (docSnap.exists()) {
@@ -189,6 +191,20 @@ export default function App() {
 
   // Sync System Config Document in real time
   useEffect(() => {
+    const initialConfig: SystemConfig = {
+      node_id: NODE_ID,
+      threshold_siaga: 60,
+      threshold_bahaya: 90,
+      status_alat: 'Online',
+      auto_simulation: false,
+      simulation_mode: 'dry',
+      sampling_rate_seconds: 60,
+      reference_height: 300
+    };
+    if (!firebaseConfigured || !db) {
+      setConfig(initialConfig);
+      return;
+    }
     const docRef = doc(db, 'system_config', NODE_ID);
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
       if (docSnap.exists()) {
@@ -264,8 +280,10 @@ export default function App() {
   // Handler to reset simulation back to actual ESP32 hardware telemetry
   const handleResetSimulation = async () => {
     try {
-      const cfgRef = doc(db, 'system_config', config?.node_id || NODE_ID);
-      await setDoc(cfgRef, { auto_simulation: false, last_updated: Date.now() }, { merge: true }).catch(console.error);
+      if (firebaseConfigured && db) {
+        const cfgRef = doc(db, 'system_config', config?.node_id || NODE_ID);
+        await setDoc(cfgRef, { auto_simulation: false, last_updated: Date.now() }, { merge: true }).catch(console.error);
+      }
       await fetch('/api/sim-data/reset', { method: 'POST' });
       // Reset local states to offline immediately
       setLatestReading(null);
@@ -290,7 +308,7 @@ export default function App() {
 
     if (isValidUsername && isValidPassword) {
       // If user logs in with the new INITIAL_DEFAULT_SECRET, ensure Firestore is synced
-      if (inputPassword === INITIAL_DEFAULT_SECRET && adminCredentials.password !== INITIAL_DEFAULT_SECRET) {
+      if (firebaseConfigured && db && inputPassword === INITIAL_DEFAULT_SECRET && adminCredentials.password !== INITIAL_DEFAULT_SECRET) {
         const credRef = doc(db, 'admin_auth', 'credentials');
         setDoc(credRef, {
           username: 'admin',
@@ -325,6 +343,7 @@ export default function App() {
 
   // Action to update configurations in real time
   const handleUpdateConfig = async (newConfig: Partial<SystemConfig>) => {
+    if (!firebaseConfigured || !db) return;
     try {
       const docRef = doc(db, 'system_config', NODE_ID);
       await updateDoc(docRef, newConfig);
@@ -663,13 +682,14 @@ export default function App() {
             prefPushSiaga={prefPushSiaga}
             prefPushBahaya={prefPushBahaya}
             onNavigateTab={setActiveTab}
+            onEnterSimulation={() => setActiveTab('simulation')}
             onLatestReadingChange={handleLatestReadingChange}
             language={language}
             soundEnabled={soundEnabled}
             onToggleSound={handleToggleSound}
             onResetSimulation={handleResetSimulation}
           />
-        ) : (
+        ) : activeTab === 'admin' ? (
           <AdminPanel 
             config={config} 
             onUpdateConfig={handleUpdateConfig}
@@ -686,6 +706,8 @@ export default function App() {
             onNavigateTab={setActiveTab}
             onResetSimulation={handleResetSimulation}
           />
+        ) : (
+          <CiliwungSimulationPage theme={theme} language={language} onExit={() => setActiveTab('dashboard')} />
         )}
       </main>
 
