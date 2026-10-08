@@ -35,7 +35,7 @@ test('registers the complete Ciliwung REST and SSE contract', () => {
   for (const method of ['GET', 'POST']) {
     for (const path of method === 'GET'
       ? ['/api/ciliwung-simulation/scenarios', '/api/ciliwung-simulation/state', '/api/ciliwung-simulation/stream']
-      : ['/api/ciliwung-simulation/start', '/api/ciliwung-simulation/stop', '/api/ciliwung-simulation/reset']) {
+      : ['/api/ciliwung-simulation/start', '/api/ciliwung-simulation/stop', '/api/ciliwung-simulation/reset', '/api/ciliwung-simulation/speed']) {
       assert.equal(typeof app.routes.get(`${method} ${path}`), 'function');
     }
   }
@@ -54,6 +54,21 @@ test('start returns a reset running state and sends no Firestore dependency', as
   assert.equal(response.body.state.status, 'running');
   assert.equal(response.body.state.scenario, 'sedang');
   assert.ok(sendCount >= 1);
+});
+
+test('speed endpoint updates the authoritative simulation speed', async () => {
+  const app = makeApp();
+  const engine = createCiliwungEngine({ autoStart: false });
+  registerCiliwungRoutes(app, { engine, sendCupCarbon: () => {} });
+
+  const startResponse = makeResponse();
+  await app.routes.get('POST /api/ciliwung-simulation/start')({ body: { scenario: 'sedang', speedMultiplier: 25 } }, startResponse);
+  assert.equal(startResponse.body.state.speedMultiplier, 25);
+
+  const speedResponse = makeResponse();
+  await app.routes.get('POST /api/ciliwung-simulation/speed')({ body: { speedMultiplier: 50 } }, speedResponse);
+  assert.equal(speedResponse.body.success, true);
+  assert.equal(speedResponse.body.state.speedMultiplier, 50);
 });
 
 test('stream sends an initial event and removes the client on close', () => {

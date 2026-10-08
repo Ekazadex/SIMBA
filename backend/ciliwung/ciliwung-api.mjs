@@ -64,7 +64,16 @@ export function registerCiliwungRoutes(app, { engine, sendCupCarbon = (_state) =
 
   app.post('/api/ciliwung-simulation/start', (request, response) => {
     try {
-      const state = engine.start(request.body?.scenario);
+      const state = engine.start(request.body?.scenario, request.body?.speedMultiplier);
+      return response.json({ success: true, state });
+    } catch (error) {
+      return sendJson(response, 400, { success: false, error: error.message });
+    }
+  });
+
+  app.post('/api/ciliwung-simulation/speed', (request, response) => {
+    try {
+      const state = engine.setSpeedMultiplier(request.body?.speedMultiplier);
       return response.json({ success: true, state });
     } catch (error) {
       return sendJson(response, 400, { success: false, error: error.message });

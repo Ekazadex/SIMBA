@@ -14,6 +14,7 @@ for (const route of [
   '/api/ciliwung-simulation/start',
   '/api/ciliwung-simulation/stop',
   '/api/ciliwung-simulation/reset',
+  '/api/ciliwung-simulation/speed',
 ]) assert.ok(api.includes(route), `missing API route ${route}`);
 assert.ok(server.includes('createCiliwungEngine'), 'server does not create the Ciliwung engine');
 assert.ok(server.includes('createSocket'), 'server does not create the CupCarbon UDP transport');

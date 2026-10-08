@@ -1,4 +1,6 @@
 const DEFAULT_INTERVAL_MS = 500;
+export const SPEED_MULTIPLIERS = Object.freeze([1, 10, 25, 50]);
+const DEFAULT_SPEED_MULTIPLIER = SPEED_MULTIPLIERS[0];
 const EPSILON = 1e-9;
 
 export const NODE_REGISTRY = Object.freeze([
@@ -76,6 +78,7 @@ function makeInitialState() {
     runId: null,
     scenario: null,
     status: 'idle',
+    speedMultiplier: DEFAULT_SPEED_MULTIPLIER,
     simTimeSeconds: 0,
     targetNodeId: null,
     targetThresholdCm: null,
@@ -95,6 +98,14 @@ function validateScenario(scenario) {
     throw new RangeError(`Unknown Ciliwung scenario: ${scenario}`);
   }
   return SCENARIO_PROFILES[scenario];
+}
+
+function validateSpeedMultiplier(speedMultiplier = DEFAULT_SPEED_MULTIPLIER) {
+  const numericSpeed = Number(speedMultiplier);
+  if (!SPEED_MULTIPLIERS.includes(numericSpeed)) {
+    throw new RangeError(`Unsupported Ciliwung speed multiplier: ${speedMultiplier}`);
+  }
+  return numericSpeed;
 }
 
 export function createCiliwungEngine(options = {}) {
@@ -145,8 +156,9 @@ export function createCiliwungEngine(options = {}) {
     return true;
   }
 
-  function start(scenario) {
+  function start(scenario, requestedSpeedMultiplier = DEFAULT_SPEED_MULTIPLIER) {
     const profile = validateScenario(scenario);
+    const speedMultiplier = validateSpeedMultiplier(requestedSpeedMultiplier);
     clearTimer();
     storageRiseCm = Array(NODE_REGISTRY.length).fill(0);
     pendingEvents = [];
@@ -156,6 +168,7 @@ export function createCiliwungEngine(options = {}) {
       runId: `ciliwung-${Date.now()}-${runCounter}`,
       scenario: profile.id,
       status: 'running',
+      speedMultiplier,
       targetNodeId: profile.targetNodeId,
       targetThresholdCm: profile.targetThresholdCm,
     };
@@ -179,11 +192,12 @@ export function createCiliwungEngine(options = {}) {
     if (state.status !== 'running') return clone(state);
 
     const profile = SCENARIO_PROFILES[state.scenario];
+    const effectiveDtSeconds = dtSeconds * state.speedMultiplier;
     const startTime = state.simTimeSeconds;
-    const endTime = startTime + dtSeconds;
+    const endTime = startTime + effectiveDtSeconds;
 
     for (let nodeIndex = 0; nodeIndex < NODE_REGISTRY.length; nodeIndex += 1) {
-      const localIncrement = profile.localRiseCmPerSecond[nodeIndex] * dtSeconds;
+      const localIncrement = profile.localRiseCmPerSecond[nodeIndex] * effectiveDtSeconds;
       if (localIncrement > 0) {
         pendingEvents.push({ nodeIndex, arrivalTimeSeconds: startTime, incrementCm: localIncrement });
       }
@@ -232,6 +246,12 @@ export function createCiliwungEngine(options = {}) {
     return publish();
   }
 
+  function setSpeedMultiplier(requestedSpeedMultiplier) {
+    const speedMultiplier = validateSpeedMultiplier(requestedSpeedMultiplier);
+    state = { ...state, speedMultiplier };
+    return publish();
+  }
+
   function stop() {
     clearTimer();
     if (state.status === 'running') state = { ...state, status: 'stopped' };
@@ -272,6 +292,7 @@ export function createCiliwungEngine(options = {}) {
   return {
     start,
     advance,
+    setSpeedMultiplier,
     stop,
     reset,
     subscribe,

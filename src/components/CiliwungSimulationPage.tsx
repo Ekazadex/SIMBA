@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 type SimulationView = 'simulation' | 'graph';
 type ScenarioId = 'ringan' | 'sedang' | 'lebat';
+type SpeedMultiplier = 1 | 10 | 25 | 50;
 
 type CiliwungNode = {
   id: string;
@@ -17,6 +18,7 @@ type CiliwungState = {
   runId: string | null;
   scenario: ScenarioId | null;
   status: 'idle' | 'running' | 'stopped' | 'completed';
+  speedMultiplier: SpeedMultiplier;
   simTimeSeconds: number;
   targetNodeId: string | null;
   targetThresholdCm: number | null;
@@ -39,6 +41,7 @@ const SCENARIOS: Array<{ id: ScenarioId; label: string; description: string }> =
 ];
 
 const MAIN_GRAPH_NODES = ['N1', 'N2', 'N3', 'N4', 'N5'];
+const SPEED_OPTIONS: SpeedMultiplier[] = [1, 10, 25, 50];
 
 function formatTime(seconds: number) {
   const total = Math.max(0, Math.floor(seconds));
@@ -68,6 +71,7 @@ export default function CiliwungSimulationPage({
 }) {
   const isDark = theme === 'dark';
   const [selectedScenario, setSelectedScenario] = useState<ScenarioId>('ringan');
+  const [selectedSpeed, setSelectedSpeed] = useState<SpeedMultiplier>(1);
   const [activeView, setActiveView] = useState<SimulationView>('simulation');
   const [state, setState] = useState<CiliwungState | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
@@ -90,6 +94,7 @@ export default function CiliwungSimulationPage({
       try {
         const next = JSON.parse(event.data) as CiliwungState;
         setState(next);
+        if (next.status === 'running') setSelectedSpeed(next.speedMultiplier);
         if (lastHistoryTime.current !== next.simTimeSeconds) {
           lastHistoryTime.current = next.simTimeSeconds;
           setHistory((current) => [
@@ -144,8 +149,20 @@ export default function CiliwungSimulationPage({
   }
 
   async function handleStart() {
-    const payload = await request('/api/ciliwung-simulation/start', { scenario: selectedScenario });
+    const payload = await request('/api/ciliwung-simulation/start', {
+      scenario: selectedScenario,
+      speedMultiplier: selectedSpeed,
+    });
     if (payload) setHistory([]);
+  }
+
+  async function handleSpeedChange(event: React.ChangeEvent<HTMLSelectElement>) {
+    const nextSpeed = Number(event.target.value) as SpeedMultiplier;
+    setSelectedSpeed(nextSpeed);
+    if (isRunning) {
+      const payload = await request('/api/ciliwung-simulation/speed', { speedMultiplier: nextSpeed });
+      if (!payload) setSelectedSpeed(state?.speedMultiplier ?? 1);
+    }
   }
 
   async function handleStop() {
@@ -156,6 +173,7 @@ export default function CiliwungSimulationPage({
     const payload = await request('/api/ciliwung-simulation/reset');
     if (payload) {
       setHistory([]);
+      setSelectedSpeed(1);
       lastHistoryTime.current = null;
     }
   }
@@ -216,6 +234,21 @@ export default function CiliwungSimulationPage({
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div><span className="block text-[10px] text-slate-500 uppercase">Time</span><strong>{formatTime(state?.simTimeSeconds ?? 0)}</strong></div>
               <div><span className="block text-[10px] text-slate-500 uppercase">Target</span><strong>{state?.targetNodeId ?? '—'}</strong></div>
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2">
+              <div>
+                <span className="block text-[10px] text-slate-500 uppercase">Simulation speed</span>
+                <span className="text-[11px] text-slate-400">Accelerates scenario time only</span>
+              </div>
+              <select
+                aria-label="Simulation speed"
+                value={isRunning ? (state?.speedMultiplier ?? selectedSpeed) : selectedSpeed}
+                onChange={handleSpeedChange}
+                disabled={busy}
+                className={`rounded-lg border px-3 py-2 text-xs font-bold outline-none ${isDark ? 'border-white/10 bg-black/40 text-white' : 'border-slate-200 bg-white text-slate-700'}`}
+              >
+                {SPEED_OPTIONS.map((speed) => <option key={speed} value={speed}>{speed}x</option>)}
+              </select>
             </div>
             <div className="flex gap-2">
               <button type="button" onClick={handleStart} disabled={busy || isRunning} className="flex-1 px-3 py-2 rounded-lg bg-[#3B82F6] hover:bg-blue-500 text-black text-xs font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">{isRunning ? 'Running...' : 'Start Simulation'}</button>

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createCiliwungEngine, NODE_REGISTRY, SCENARIO_PROFILES } from '../backend/ciliwung/simulation-engine.mjs';
+import { createCiliwungEngine, NODE_REGISTRY, SCENARIO_PROFILES, SPEED_MULTIPLIERS } from '../backend/ciliwung/simulation-engine.mjs';
 
 test('registry contains the four upstream nodes and five 3D nodes', () => {
   assert.equal(NODE_REGISTRY.length, 9);
@@ -70,6 +70,33 @@ test('auto-completes at the scenario target and freezes the completed state', ()
   assert.equal(after.status, 'completed');
   engine.reset();
   assert.equal(engine.getState().status, 'idle');
+});
+
+test('speed multipliers scale simulation time without changing the node model', () => {
+  assert.deepEqual(SPEED_MULTIPLIERS, [1, 10, 25, 50]);
+  const engine = createCiliwungEngine({ intervalMs: 10, autoStart: false });
+  engine.start('ringan', 10);
+  assert.equal(engine.getState().speedMultiplier, 10);
+
+  engine.advance(1);
+  assert.equal(engine.getState().simTimeSeconds, 10);
+
+  engine.setSpeedMultiplier(50);
+  engine.advance(1);
+  assert.equal(engine.getState().simTimeSeconds, 60);
+  assert.equal(engine.getState().cupNodes.length, 9);
+  engine.stop();
+});
+
+test('invalid speed multipliers are rejected without corrupting the run', () => {
+  const engine = createCiliwungEngine({ intervalMs: 10, autoStart: false });
+  assert.throws(() => engine.start('ringan', 5), /unsupported.*speed/i);
+  assert.equal(engine.getState().status, 'idle');
+
+  engine.start('ringan', 25);
+  assert.throws(() => engine.setSpeedMultiplier(2), /unsupported.*speed/i);
+  assert.equal(engine.getState().speedMultiplier, 25);
+  engine.stop();
 });
 
 test('invalid scenario names are rejected without corrupting the current state', () => {

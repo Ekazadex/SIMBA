@@ -16,7 +16,7 @@ for (const marker of [
   "setActiveTab('simulation')",
 ]) assert.ok(app.includes(marker), `missing App integration marker: ${marker}`);
 for (const marker of ['onEnterSimulation', 'Masuk Mode Simulasi']) assert.ok(dashboard.includes(marker), `missing dashboard marker: ${marker}`);
-for (const marker of ['View Simulation', 'View Graph', 'Start Simulation', 'Exit Simulation', 'EventSource', '/api/ciliwung-simulation/start']) {
+for (const marker of ['View Simulation', 'View Graph', 'Start Simulation', 'Exit Simulation', 'EventSource', '/api/ciliwung-simulation/start', '/api/ciliwung-simulation/speed', 'SPEED_OPTIONS', 'speed}x']) {
   assert.ok(page.includes(marker), `missing simulation page marker: ${marker}`);
 }
 assert.ok(!page.includes('firebase/firestore'), 'simulation page must not read Firestore directly');

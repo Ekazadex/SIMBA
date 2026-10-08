@@ -40,7 +40,8 @@
 GET  /api/ciliwung-simulation/scenarios
 GET  /api/ciliwung-simulation/state
 GET  /api/ciliwung-simulation/stream
-POST /api/ciliwung-simulation/start   {"scenario":"ringan|sedang|lebat"}
+POST /api/ciliwung-simulation/start   {"scenario":"ringan|sedang|lebat", "speedMultiplier":1|10|25|50}
+POST /api/ciliwung-simulation/speed   {"speedMultiplier":1|10|25|50}
 POST /api/ciliwung-simulation/stop
 POST /api/ciliwung-simulation/reset
 ```
