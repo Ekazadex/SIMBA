@@ -80,7 +80,7 @@ export default function CiliwungSimulationPage({
   const apiBase = typeof window !== 'undefined' ? window.location.origin : '';
   const threeDUrl = useMemo(() => {
     const streamUrl = `${apiBase}/api/ciliwung-simulation/stream`;
-    return `http://127.0.0.1:8765/?mode=backend&api=${encodeURIComponent(streamUrl)}`;
+    return `http://127.0.0.1:8765/?mode=backend&ui=20261008-backend&api=${encodeURIComponent(streamUrl)}`;
   }, [apiBase]);
 
   useEffect(() => {
