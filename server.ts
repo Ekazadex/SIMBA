@@ -807,7 +807,14 @@ app.post('/api/sim-data', express.json(), async (req, res) => {
   try {
     const { mode, water_level, scenario, action } = req.body;
     console.log(`[API] Injected simulation command: mode=${mode}, water_level=${water_level}, scenario=${scenario}, action=${action}`);
-    
+
+    if (!db && action !== 'stop' && scenario !== 'stop') {
+      return res.status(503).json({
+        success: false,
+        error: 'Legacy single-node simulation requires Firebase. Use /api/ciliwung-simulation/* for the low-I/O Ciliwung simulation.',
+      });
+    }
+
     if (action === 'reset' || scenario === 'reset') {
       const resetResult = await resetSimulationData();
       return res.json({ 
@@ -847,6 +854,12 @@ app.post('/api/sim-data', express.json(), async (req, res) => {
 
 // Dedicated endpoint for resetting simulation back to real hardware telemetry
 app.post('/api/sim-data/reset', express.json(), async (req, res) => {
+  if (!db) {
+    return res.status(503).json({
+      success: false,
+      error: 'Legacy single-node simulation reset requires Firebase. Ciliwung Simulation Mode has its own reset endpoint.',
+    });
+  }
   try {
     const result = await resetSimulationData();
     res.json({ 
@@ -862,6 +875,12 @@ app.post('/api/sim-data/reset', express.json(), async (req, res) => {
 // Endpoint specifically for starting/stopping the manual heavy rain flood scenario
 app.post('/api/sim-data/scenario', express.json(), async (req, res) => {
   const { scenario = 'heavy_rain_flood', action = 'start' } = req.body;
+  if (!db && action !== 'stop') {
+    return res.status(503).json({
+      success: false,
+      error: 'Legacy single-node scenarios require Firebase. Use /api/ciliwung-simulation/start for the Ciliwung scenario mode.',
+    });
+  }
   if (action === 'reset') {
     const result = await resetSimulationData();
     return res.json({ success: true, status: 'reset', message: 'Scenario reset to real hardware telemetry.', deletedCount: result.count });
