@@ -95,16 +95,15 @@ export default function CiliwungSimulationPage({
         const next = JSON.parse(event.data) as CiliwungState;
         setState(next);
         if (next.status === 'running') setSelectedSpeed(next.speedMultiplier);
-        if (lastHistoryTime.current !== next.simTimeSeconds) {
+        const point: HistoryPoint = {
+          time: next.simTimeSeconds,
+          values: Object.fromEntries(next.cupNodes.map((node) => [node.id, node.tmaCm])),
+        };
+        setHistory((current) => {
+          if (lastHistoryTime.current === next.simTimeSeconds) return current;
           lastHistoryTime.current = next.simTimeSeconds;
-          setHistory((current) => [
-            ...current.slice(-119),
-            {
-              time: next.simTimeSeconds,
-              values: Object.fromEntries(next.cupNodes.map((node) => [node.id, node.tmaCm])),
-            },
-          ]);
-        }
+          return [...current.slice(-119), point];
+        });
       } catch {
         setError('State simulasi dari backend tidak valid.');
       }
@@ -119,9 +118,14 @@ export default function CiliwungSimulationPage({
 
   const selectedProfile = SCENARIOS.find((scenario) => scenario.id === selectedScenario) ?? SCENARIOS[0];
   const isRunning = state?.status === 'running';
-  const graphMax = Math.max(300, ...history.map((point) => point.values[graphNodeId] ?? 0));
-  const graphPoints = history.map((point, index) => {
-    const x = history.length <= 1 ? 0 : (index / (history.length - 1)) * 780 + 10;
+  const baseline = state ? {
+    time: state.simTimeSeconds,
+    values: Object.fromEntries(state.cupNodes.map((node) => [node.id, node.tmaCm])),
+  } : null;
+  const graphHistory = history.length > 0 ? history : baseline ? [baseline] : [];
+  const graphMax = Math.max(300, ...graphHistory.map((point) => point.values[graphNodeId] ?? 0));
+  const graphPoints = graphHistory.map((point, index) => {
+    const x = graphHistory.length <= 1 ? 10 : (index / (graphHistory.length - 1)) * 780 + 10;
     const value = point.values[graphNodeId] ?? 0;
     const y = 220 - (value / graphMax) * 200;
     return `${x.toFixed(1)},${y.toFixed(1)}`;
@@ -149,11 +153,12 @@ export default function CiliwungSimulationPage({
   }
 
   async function handleStart() {
-    const payload = await request('/api/ciliwung-simulation/start', {
+    lastHistoryTime.current = null;
+    setHistory([]);
+    await request('/api/ciliwung-simulation/start', {
       scenario: selectedScenario,
       speedMultiplier: selectedSpeed,
     });
-    if (payload) setHistory([]);
   }
 
   async function handleSpeedChange(event: React.ChangeEvent<HTMLSelectElement>) {
@@ -170,11 +175,11 @@ export default function CiliwungSimulationPage({
   }
 
   async function handleReset() {
+    lastHistoryTime.current = null;
+    setHistory([]);
     const payload = await request('/api/ciliwung-simulation/reset');
     if (payload) {
-      setHistory([]);
       setSelectedSpeed(1);
-      lastHistoryTime.current = null;
     }
   }
 
@@ -279,8 +284,8 @@ export default function CiliwungSimulationPage({
         <section className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} rounded-2xl border p-5 lg:p-7`}>
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
             <div>
-              <h2 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>TMA Scenario Graph</h2>
-              <p className={`text-xs mt-1 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>Data berasal dari state backend, bukan query Firestore setiap timestep.</p>
+              <h2 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{selectedProfile.label} · TMA Graph</h2>
+              <p className={`text-xs mt-1 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>Node {graphNodeId} · Data berasal dari state backend, bukan query Firestore setiap timestep.</p>
             </div>
             <select value={graphNodeId} onChange={(event) => setGraphNodeId(event.target.value)} className={`rounded-lg border px-3 py-2 text-xs ${isDark ? 'bg-black/30 border-white/10 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}>
               {MAIN_GRAPH_NODES.map((nodeId) => <option key={nodeId} value={nodeId}>{nodeId}</option>)}
@@ -291,7 +296,8 @@ export default function CiliwungSimulationPage({
               <line x1="10" y1="220" x2="790" y2="220" stroke="currentColor" opacity=".25" />
               <line x1="10" y1="20" x2="10" y2="220" stroke="currentColor" opacity=".25" />
               {graphPoints && <polyline points={graphPoints} fill="none" stroke="#3B82F6" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />}
-              {!graphPoints && <text x="400" y="125" textAnchor="middle" fill="currentColor" opacity=".5" fontSize="14">Tekan Start Simulation untuk mengisi graph</text>}
+              {graphHistory.length === 1 && graphPoints && <circle cx="10" cy={graphPoints.split(',')[1]} r="5" fill="#3B82F6" />}
+              {!graphPoints && <text x="400" y="125" textAnchor="middle" fill="currentColor" opacity=".5" fontSize="14">Menunggu state backend...</text>}
             </svg>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-5">
