@@ -14,6 +14,7 @@ import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, addDoc, getDocs, query, orderBy, limit, setDoc, doc, onSnapshot, deleteDoc, where } from 'firebase/firestore';
 import { createCiliwungEngine } from './backend/ciliwung/simulation-engine.mjs';
 import { registerCiliwungRoutes } from './backend/ciliwung/ciliwung-api.mjs';
+import { createCupCarbonTelemetryListener, CUPCARBON_TELEMETRY_PORT } from './backend/ciliwung/cupcarbon-telemetry.mjs';
 
 dotenv.config();
 
@@ -55,9 +56,27 @@ const ciliwungRoutes = registerCiliwungRoutes(app, {
   },
 });
 cupCarbonSocket.unref();
+const cupCarbonTelemetry = createCupCarbonTelemetryListener({
+  port: CUPCARBON_TELEMETRY_PORT,
+  onTelemetry: (telemetry) => {
+    const waktu = new Date(telemetry.receivedAt).toLocaleTimeString('id-ID', { hour12: false });
+    console.log(`[CupCarbon RX] ${waktu} | ${telemetry.nodeName} | TMA: ${telemetry.tmaCm} cm | ${telemetry.status}`);
+    ciliwungEngine.markCupCarbonTelemetry(telemetry, telemetry.receivedAt);
+  },
+  onStale: () => {
+    ciliwungEngine.markCupCarbonOffline();
+  },
+  onError: (error) => {
+    console.error('[CupCarbon] Telemetry listener error:', error);
+  },
+});
+cupCarbonTelemetry.listening
+  .then((address) => console.log(`[CupCarbon] Telemetry listener active on UDP ${address.address}:${address.port}`))
+  .catch((error) => console.error('[CupCarbon] Telemetry listener could not start:', error));
 
 process.on('exit', () => {
   ciliwungRoutes.unsubscribe();
+  cupCarbonTelemetry.close();
   try {
     cupCarbonSocket.close();
   } catch {

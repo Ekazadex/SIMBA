@@ -24,8 +24,8 @@ export function registerCiliwungRoutes(app, { engine, sendCupCarbon = (_state) =
   if (!engine || typeof engine.getState !== 'function' || typeof engine.subscribe !== 'function') throw new TypeError('a Ciliwung engine is required');
 
   const clients = new Set();
-  const unsubscribe = engine.subscribe((state) => {
-    sendCupCarbon(state);
+  const unsubscribe = engine.subscribe((state, metadata = {}) => {
+    if (metadata.sendCupCarbon !== false) sendCupCarbon(state);
     for (const response of clients) {
       try {
         writeSse(response, state);

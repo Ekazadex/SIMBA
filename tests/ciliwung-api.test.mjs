@@ -71,6 +71,18 @@ test('speed endpoint updates the authoritative simulation speed', async () => {
   assert.equal(speedResponse.body.state.speedMultiplier, 50);
 });
 
+test('CupCarbon telemetry updates SSE state without echoing a control datagram', () => {
+  const app = makeApp();
+  const engine = createCiliwungEngine({ autoStart: false });
+  let sendCount = 0;
+  registerCiliwungRoutes(app, { engine, sendCupCarbon: () => { sendCount += 1; } });
+  const initialSendCount = sendCount;
+
+  const state = engine.markCupCarbonTelemetry({ nodeId: 'N1', tmaCm: 61, status: 'AMAN' }, 1234);
+  assert.equal(state.cupcarbon.status, 'active');
+  assert.equal(sendCount, initialSendCount);
+});
+
 test('stream sends an initial event and removes the client on close', () => {
   const app = makeApp();
   const engine = createCiliwungEngine({ autoStart: false });

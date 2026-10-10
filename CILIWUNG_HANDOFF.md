@@ -12,8 +12,9 @@ Read this file before changing the Ciliwung simulation. Inspect the current file
 - Backend owner: `Website/SIMBA/server.ts`
 - Active Git branch: `naufal`
 - `main` must not be changed or pushed unless the user explicitly asks.
-- Latest local commit: `16c3273 fix: render scenario graph baseline and node selection`
-- `origin/naufal` was verified at `1934ada`; local branch is one commit ahead because the graph fix has not been pushed.
+- Latest committed baseline: `8bb0e2f docs: add Ciliwung Hermes session handoff`
+- This continuation is intentionally kept on the `naufal` branch and is not pushed to `main`.
+- `origin/naufal` is at `1934ada`; the committed branch is two commits ahead (`16c3273` and `8bb0e2f`), with this continuation currently uncommitted.
 
 ## User's goal
 
@@ -36,6 +37,7 @@ Website Simulation Mode is separate from the hardware dashboard and has `View Si
 - 3D backend mode query: `?mode=backend&api=...`
 - CupCarbon commands: UDP to `127.0.0.1` ports `5101` through `5109`
 - CupCarbon telemetry/logger: UDP port `5005`
+- Website CupCarbon telemetry listener: parses the nine active script datagrams, marks `cupcarbon.status` as `active`, counts nodes seen, and falls back to `not_verified` after 4 seconds without telemetry.
 - Active simulation state is in RAM and streamed through SSE. It must not write Firestore on every timestep.
 - Hardware ESP32 telemetry and simulation state are separate. Simulation reset must not delete or overwrite hardware telemetry.
 
@@ -61,6 +63,7 @@ Node registry:
 - Graph title shows the selected scenario and node.
 - Graph renders a baseline point before the first timestep and live history after Start.
 - Backend/local 3D mode hides the old local rainfall control sidebar.
+- Simulation Status shows CupCarbon connection state and the number of nodes that have reported telemetry.
 
 Speed API:
 
@@ -79,13 +82,14 @@ Other API routes:
 
 From `Website/SIMBA`:
 
-- `npm test` — 12 tests passed
+- `npm test` — 17 tests passed
 - `npm run build` — passed; Vite emits only the existing large-bundle warning
 - `npm run verify:ciliwung` — API, frontend, CupCarbon integration, and regression checks passed
 - 3D project tests previously passed: 43 tests
 - CupCarbon Python scripts previously passed syntax compilation
 - Live speed API test passed: 10x, then 50x, then reset to 1x
 - Live heavy scenario at 50x completed at N5 threshold
+- Live UDP telemetry probe passed: zero-to-active transition, all nine node reports, stale fallback, simulation start, and stop.
 
 ## Local runtime commands
 
@@ -117,7 +121,7 @@ The local CupCarbon project was verified running with `IoT Simulation` active an
 
 ## Known limitations / next work
 
-1. Website `cupcarbon.status` is currently `not_verified` by design. The backend sends UDP commands but does not yet implement a CupCarbon heartbeat/telemetry listener that changes the Website warning to Active. Do not claim automatic detection until this is implemented and tested.
+1. CupCarbon status is now verified from local UDP telemetry, not from process discovery. A valid datagram marks the state active, while silence for 4 seconds returns it to `not_verified`; this does not prove that the CupCarbon GUI process itself is healthy.
 2. The local processes may be stopped when a Hermes session or background process is closed. Always check ports before telling the user the Website is available.
 3. Companion 3D and CupCarbon folders are not separate Git repositories. Preserve backups before broad edits and report that their changes are not covered by the SIMBA branch.
 4. Do not run `npm audit fix --force` without user approval. Existing dependency advisories and the Vite bundle-size warning are known.

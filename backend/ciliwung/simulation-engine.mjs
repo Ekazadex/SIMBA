@@ -2,17 +2,23 @@ const DEFAULT_INTERVAL_MS = 500;
 export const SPEED_MULTIPLIERS = Object.freeze([1, 10, 25, 50]);
 const DEFAULT_SPEED_MULTIPLIER = SPEED_MULTIPLIERS[0];
 const EPSILON = 1e-9;
+const DEFAULT_CUPCARBON_STATE = Object.freeze({
+  status: 'not_verified',
+  warning: 'CupCarbon belum diverifikasi aktif. Backend tetap menjalankan scenario.',
+  lastSeenAt: null,
+  activeNodeCount: 0,
+});
 
 export const NODE_REGISTRY = Object.freeze([
-  { id: 'UP1', name: 'Puncak', cupcarbonNodeId: 1, script: 'puncak.py', threeDNodeId: null, baselineTmaCm: 40, thresholds: { siaga: 70, banjir: Infinity }, controlPort: 5101 },
-  { id: 'UP2', name: 'Katulampa', cupcarbonNodeId: 2, script: 'katulampa.py', threeDNodeId: null, baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5102 },
-  { id: 'UP3', name: 'Sukaraja', cupcarbonNodeId: 3, script: 'sukaraja.py', threeDNodeId: null, baselineTmaCm: 100, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5103 },
-  { id: 'UP4', name: 'Cibinong', cupcarbonNodeId: 4, script: 'cibinong.py', threeDNodeId: null, baselineTmaCm: 150, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5104 },
-  { id: 'N1', name: 'Pos Depok', cupcarbonNodeId: 5, script: 'pos_depok.py', threeDNodeId: 'N1', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5105 },
-  { id: 'N2', name: 'Ciliwung Stage 1', cupcarbonNodeId: 20, script: 'ciliwung_stage1.py', threeDNodeId: 'N2', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5106 },
-  { id: 'N3', name: 'Ciliwung Stage 2', cupcarbonNodeId: 21, script: 'ciliwung_stage2.py', threeDNodeId: 'N3', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5107 },
-  { id: 'N4', name: 'Ciliwung Stage 3', cupcarbonNodeId: 22, script: 'ciliwung_stage3.py', threeDNodeId: 'N4', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5108 },
-  { id: 'N5', name: 'Pintu Air Manggarai', cupcarbonNodeId: 8, script: 'pintu_air_manggarai.py', threeDNodeId: 'N5', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5109 },
+  { id: 'UP1', name: 'Puncak', telemetryName: 'Node_1_Puncak', cupcarbonNodeId: 1, script: 'puncak.py', threeDNodeId: null, baselineTmaCm: 40, thresholds: { siaga: 70, banjir: Infinity }, controlPort: 5101 },
+  { id: 'UP2', name: 'Katulampa', telemetryName: 'Node_2_Katulampa', cupcarbonNodeId: 2, script: 'katulampa.py', threeDNodeId: null, baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5102 },
+  { id: 'UP3', name: 'Sukaraja', telemetryName: 'Node_3_Sukaraja', cupcarbonNodeId: 3, script: 'sukaraja.py', threeDNodeId: null, baselineTmaCm: 100, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5103 },
+  { id: 'UP4', name: 'Cibinong', telemetryName: 'Node_4_Cibinong', cupcarbonNodeId: 4, script: 'cibinong.py', threeDNodeId: null, baselineTmaCm: 150, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5104 },
+  { id: 'N1', name: 'Pos Depok', telemetryName: 'N1 Pos Depok', cupcarbonNodeId: 5, script: 'pos_depok.py', threeDNodeId: 'N1', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5105 },
+  { id: 'N2', name: 'Ciliwung Stage 1', telemetryName: 'N2 Ciliwung Stage 1', cupcarbonNodeId: 20, script: 'ciliwung_stage1.py', threeDNodeId: 'N2', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5106 },
+  { id: 'N3', name: 'Ciliwung Stage 2', telemetryName: 'N3 Ciliwung Stage 2', cupcarbonNodeId: 21, script: 'ciliwung_stage2.py', threeDNodeId: 'N3', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5107 },
+  { id: 'N4', name: 'Ciliwung Stage 3', telemetryName: 'N4 Ciliwung Stage 3', cupcarbonNodeId: 22, script: 'ciliwung_stage3.py', threeDNodeId: 'N4', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5108 },
+  { id: 'N5', name: 'Pintu Air Manggarai', telemetryName: 'N5 Pintu Air Manggarai', cupcarbonNodeId: 8, script: 'pintu_air_manggarai.py', threeDNodeId: 'N5', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5109 },
 ]);
 
 const REACH_DELAY_SECONDS = Object.freeze([20, 25, 30, 35, 40, 45, 50, 55]);
@@ -71,7 +77,7 @@ function buildNodes(storageRiseCm) {
   });
 }
 
-function makeInitialState() {
+function makeInitialState(cupcarbon = DEFAULT_CUPCARBON_STATE) {
   const storageRiseCm = Array(NODE_REGISTRY.length).fill(0);
   const cupNodes = buildNodes(storageRiseCm);
   return {
@@ -82,10 +88,7 @@ function makeInitialState() {
     simTimeSeconds: 0,
     targetNodeId: null,
     targetThresholdCm: null,
-    cupcarbon: {
-      status: 'not_verified',
-      warning: 'CupCarbon belum diverifikasi aktif. Backend tetap menjalankan scenario.',
-    },
+    cupcarbon: clone(cupcarbon),
     cupNodes,
     threeDNodes: cupNodes.filter((node) => node.threeDNodeId),
     pendingReachCount: 0,
@@ -113,23 +116,27 @@ export function createCiliwungEngine(options = {}) {
   const autoStart = options.autoStart ?? true;
   if (!Number.isFinite(intervalMs) || intervalMs <= 0) throw new RangeError('intervalMs must be positive');
 
-  let state = makeInitialState();
+  let cupcarbonState = clone(DEFAULT_CUPCARBON_STATE);
+  let state = makeInitialState(cupcarbonState);
   let storageRiseCm = Array(NODE_REGISTRY.length).fill(0);
   let pendingEvents = [];
   let timer = null;
   let runCounter = 0;
   const listeners = new Set();
+  const seenCupCarbonNodes = new Set();
 
-  function publish() {
+  function publish(metadata = {}) {
+    const sendCupCarbon = metadata.sendCupCarbon !== false;
     state = {
       ...state,
+      cupcarbon: clone(cupcarbonState),
       cupNodes: buildNodes(storageRiseCm),
       threeDNodes: buildNodes(storageRiseCm).filter((node) => node.threeDNodeId),
       pendingReachCount: pendingEvents.length,
       updatedAt: Date.now(),
     };
     const snapshot = clone(state);
-    for (const listener of listeners) listener(snapshot);
+    for (const listener of listeners) listener(snapshot, { sendCupCarbon });
     return snapshot;
   }
 
@@ -164,7 +171,7 @@ export function createCiliwungEngine(options = {}) {
     pendingEvents = [];
     runCounter += 1;
     state = {
-      ...makeInitialState(),
+      ...makeInitialState(cupcarbonState),
       runId: `ciliwung-${Date.now()}-${runCounter}`,
       scenario: profile.id,
       status: 'running',
@@ -262,14 +269,47 @@ export function createCiliwungEngine(options = {}) {
     clearTimer();
     storageRiseCm = Array(NODE_REGISTRY.length).fill(0);
     pendingEvents = [];
-    state = makeInitialState();
+    state = makeInitialState(cupcarbonState);
     return publish();
+  }
+
+  function markCupCarbonTelemetry(telemetry, receivedAt = Date.now()) {
+    const node = NODE_REGISTRY.find((candidate) => candidate.id === telemetry?.nodeId);
+    if (!node) throw new RangeError(`Unknown CupCarbon telemetry node: ${telemetry?.nodeId}`);
+    const previousStatus = cupcarbonState.status;
+    const previousNodeCount = seenCupCarbonNodes.size;
+    const seenAt = Number.isFinite(receivedAt) ? receivedAt : Date.now();
+    seenCupCarbonNodes.add(node.id);
+    cupcarbonState = {
+      status: 'active',
+      warning: '',
+      lastSeenAt: seenAt,
+      activeNodeCount: seenCupCarbonNodes.size,
+    };
+    state = { ...state, cupcarbon: clone(cupcarbonState), updatedAt: seenAt };
+    if (previousStatus !== 'active' || previousNodeCount !== seenCupCarbonNodes.size) {
+      return publish({ sendCupCarbon: false });
+    }
+    return clone(state);
+  }
+
+  function markCupCarbonOffline() {
+    const wasActive = cupcarbonState.status === 'active' || seenCupCarbonNodes.size > 0;
+    seenCupCarbonNodes.clear();
+    cupcarbonState = {
+      ...cupcarbonState,
+      status: 'not_verified',
+      warning: 'CupCarbon telemetry tidak diterima. Backend tetap menjalankan scenario.',
+      activeNodeCount: 0,
+    };
+    state = { ...state, cupcarbon: clone(cupcarbonState), updatedAt: Date.now() };
+    return wasActive ? publish({ sendCupCarbon: false }) : clone(state);
   }
 
   function subscribe(listener) {
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
     listeners.add(listener);
-    listener(clone(state));
+    listener(clone(state), { sendCupCarbon: true });
     return () => listeners.delete(listener);
   }
 
@@ -295,6 +335,8 @@ export function createCiliwungEngine(options = {}) {
     setSpeedMultiplier,
     stop,
     reset,
+    markCupCarbonTelemetry,
+    markCupCarbonOffline,
     subscribe,
     getState,
     getCupCarbonCommands,

@@ -104,3 +104,26 @@ test('invalid scenario names are rejected without corrupting the current state',
   assert.throws(() => engine.start('unknown'), /unknown Ciliwung scenario/i);
   assert.equal(engine.getState().status, 'idle');
 });
+
+test('CupCarbon telemetry marks the connection active and stale without sending a loopback update', () => {
+  const engine = createCiliwungEngine({ intervalMs: 10, autoStart: false });
+  const events = [];
+  engine.subscribe((state, metadata) => events.push({ state, metadata }));
+
+  engine.start('ringan');
+  const active = engine.markCupCarbonTelemetry({ nodeId: 'N5', tmaCm: 61, status: 'AMAN' }, 1234);
+  assert.equal(active.cupcarbon.status, 'active');
+  assert.equal(active.cupcarbon.warning, '');
+  assert.equal(active.cupcarbon.lastSeenAt, 1234);
+  assert.equal(active.cupcarbon.activeNodeCount, 1);
+  assert.equal(events.at(-1).metadata.sendCupCarbon, false);
+
+  engine.reset();
+  assert.equal(engine.getState().cupcarbon.status, 'active');
+
+  const stale = engine.markCupCarbonOffline();
+  assert.equal(stale.cupcarbon.status, 'not_verified');
+  assert.equal(stale.cupcarbon.activeNodeCount, 0);
+  assert.match(stale.cupcarbon.warning, /telemetry/i);
+  assert.equal(stale.status, 'idle');
+});

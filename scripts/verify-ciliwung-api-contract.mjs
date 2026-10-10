@@ -18,6 +18,9 @@ for (const route of [
 ]) assert.ok(api.includes(route), `missing API route ${route}`);
 assert.ok(server.includes('createCiliwungEngine'), 'server does not create the Ciliwung engine');
 assert.ok(server.includes('createSocket'), 'server does not create the CupCarbon UDP transport');
+assert.ok(server.includes('createCupCarbonTelemetryListener'), 'server does not listen for CupCarbon telemetry');
+assert.ok(server.includes('markCupCarbonTelemetry'), 'server does not update CupCarbon connection state from telemetry');
+assert.ok(server.includes('CUPCARBON_TELEMETRY_PORT'), 'server does not use the configured CupCarbon telemetry port');
 assert.ok(api.includes('text/event-stream'), 'SSE content type is missing');
 assert.ok(!engine.includes('addDoc('), 'Ciliwung engine must not write Firestore per tick');
 assert.ok(!api.includes('addDoc('), 'Ciliwung API must not write Firestore per tick');

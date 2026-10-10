@@ -33,3 +33,18 @@ Scope: Add a low-I/O Ciliwung simulation mode that coordinates the SIMBA Website
   CHECK: node scripts/verify-ciliwung-regression.mjs
   EXPECT: Ciliwung regression verification passed
   EVIDENCE: exit=0; shell=C:\Windows\system32\cmd.exe; cwd=D:\Documents\Semester7\Despro2\Website\SIMBA; path=f0dd3275de53/82 entries; output=Ciliwung regression verification passed
+
+- [x] G7: CupCarbon telemetry parsing, active/stale connection state, UDP listener, and no-echo behavior are covered by tests
+  CHECK: node --test tests/ciliwung-api.test.mjs tests/ciliwung-simulation-engine.test.mjs tests/cupcarbon-telemetry.test.mjs
+  EXPECT: pass 17
+  EVIDENCE: exit=0; output=pass 17
+
+- [x] G8: API, frontend, CupCarbon script, and regression verification include the telemetry listener integration
+  CHECK: npm run verify:ciliwung
+  EXPECT: Ciliwung regression verification passed
+  EVIDENCE: exit=0; output=Ciliwung API contract verification passed | Ciliwung frontend contract verification passed | CupCarbon integration verification passed | Ciliwung regression verification passed
+
+- [x] G9: Website TypeScript and Vite production build remain valid after adding the local telemetry listener and connection status UI
+  CHECK: npm run build
+  EXPECT: built in
+  EVIDENCE: exit=0; output=✓ built in 1.08s; existing large-bundle warning only

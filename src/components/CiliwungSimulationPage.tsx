@@ -22,7 +22,7 @@ type CiliwungState = {
   simTimeSeconds: number;
   targetNodeId: string | null;
   targetThresholdCm: number | null;
-  cupcarbon: { status: string; warning: string };
+  cupcarbon: { status: string; warning: string; lastSeenAt: number | null; activeNodeCount: number };
   cupNodes: CiliwungNode[];
   threeDNodes: CiliwungNode[];
   pendingReachCount: number;
@@ -118,6 +118,8 @@ export default function CiliwungSimulationPage({
 
   const selectedProfile = SCENARIOS.find((scenario) => scenario.id === selectedScenario) ?? SCENARIOS[0];
   const isRunning = state?.status === 'running';
+  const cupCarbonActive = state?.cupcarbon?.status === 'active';
+  const cupCarbonNodeCount = state?.cupcarbon?.activeNodeCount ?? 0;
   const baseline = state ? {
     time: state.simTimeSeconds,
     values: Object.fromEntries(state.cupNodes.map((node) => [node.id, node.tmaCm])),
@@ -255,6 +257,15 @@ export default function CiliwungSimulationPage({
                 {SPEED_OPTIONS.map((speed) => <option key={speed} value={speed}>{speed}x</option>)}
               </select>
             </div>
+            <div className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2 ${isDark ? 'border-white/10 bg-white/[0.03]' : 'border-slate-200 bg-white'}`}>
+              <div>
+                <span className="block text-[10px] text-slate-500 uppercase">CupCarbon connection</span>
+                <span className="text-[11px] text-slate-400">{cupCarbonNodeCount}/9 node telemetry</span>
+              </div>
+              <span className={`rounded-full border px-2 py-1 text-[9px] font-bold ${cupCarbonActive ? (isDark ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-emerald-200 bg-emerald-50 text-emerald-700') : (isDark ? 'border-amber-500/30 bg-amber-500/10 text-amber-300' : 'border-amber-200 bg-amber-50 text-amber-700')}`}>
+                {cupCarbonActive ? 'ACTIVE' : 'NOT VERIFIED'}
+              </span>
+            </div>
             <div className="flex gap-2">
               <button type="button" onClick={handleStart} disabled={busy || isRunning} className="flex-1 px-3 py-2 rounded-lg bg-[#3B82F6] hover:bg-blue-500 text-black text-xs font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">{isRunning ? 'Running...' : 'Start Simulation'}</button>
               <button type="button" onClick={handleStop} disabled={busy || !isRunning} className={`px-3 py-2 rounded-lg border text-xs font-bold cursor-pointer disabled:opacity-50 ${isDark ? 'border-white/10 bg-white/5 hover:bg-white/10' : 'border-slate-200 bg-white hover:bg-slate-100'}`}>Stop</button>
@@ -264,7 +275,7 @@ export default function CiliwungSimulationPage({
         </div>
 
         {error && <div className="mt-4 rounded-xl border border-rose-500/30 bg-rose-500/10 text-rose-300 p-3 text-xs">{error}</div>}
-        {state?.cupcarbon?.warning && <div className={`mt-4 rounded-xl border p-3 text-xs ${isDark ? 'border-amber-500/20 bg-amber-500/10 text-amber-200' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>CupCarbon: {state.cupcarbon.warning}</div>}
+        {state?.cupcarbon?.warning && !cupCarbonActive && <div className={`mt-4 rounded-xl border p-3 text-xs ${isDark ? 'border-amber-500/20 bg-amber-500/10 text-amber-200' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>CupCarbon: {state.cupcarbon.warning}</div>}
       </section>
 
       <div className="flex gap-2">
