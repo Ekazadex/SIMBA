@@ -7,6 +7,7 @@ import React, { useState, useEffect } from 'react';
 import { db, auth, handleFirestoreError, OperationType } from '../firebaseConfig';
 import { doc, setDoc, updateDoc, collection, addDoc, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
 import { SystemConfig, SystemLog, SensorReading } from '../types';
+import { normalizeSensorReading } from '../utils/readingUtils';
 import { 
   Sliders, 
   Play, 
@@ -103,7 +104,8 @@ export default function AdminPanel({
     const q = query(collection(db, 'sensor_readings'), orderBy('timestamp', 'desc'), limit(1));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       if (!snapshot.empty) {
-        setLatestReading({ id: snapshot.docs[0].id, ...snapshot.docs[0].data() } as SensorReading);
+        const refH = config?.reference_height || 300;
+        setLatestReading(normalizeSensorReading(snapshot.docs[0].id, snapshot.docs[0].data(), refH));
       }
     }, (err) => {
       handleFirestoreError(err, OperationType.GET, 'sensor_readings');
@@ -332,6 +334,8 @@ export default function AdminPanel({
         }
       });
       setRecentPeilEntries(entries.slice(0, 5));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'sensor_readings');
     });
     return () => unsubscribe();
   }, []);
@@ -941,9 +945,44 @@ export default function AdminPanel({
 
           <p className={`text-[11px] ${themeSubtext} leading-relaxed mb-4`}>
             {language === 'en'
-              ? 'Your hardware engineer only needs the standard HTTPClient.h library. Ultrasonic reflection distance (distance in cm) sent in 6-minute batches (360 samples) is processed by the server and saved to Cloud Firestore.'
-              : 'Teman hardware Anda cukup menggunakan library standar HTTPClient.h. Data jarak pantul ultrasonik (distance dalam cm) yang dikirim per batch 6 menit (360 data) akan otomatis diolah server dan dimasukkan langsung ke Cloud Firestore.'}
+              ? 'Real-world Capstone Hardware Architecture: Standalone ESP32 WROOM 32D (no Arduino MCU, no GSM/SIM module). JSN-SR04T waterproof ultrasonic sensor measures water elevation, and Capacitive Moisture Sensor V2.0 acts as an anti-corrosion raindrop detector on top of the housing. Powered autonomously by a 4S Li-ion battery pack through a 14.8V ➔ 5V Buck Converter.'
+              : 'Arsitektur Rangkaian Nyata Proyek Capstone: ESP32 WROOM 32D Mandiri (tanpa papan Arduino, tanpa modul SIM GSM). Sensor ultrasonik waterproof JSN-SR04T mengukur elevasi muka air, dan Sensor Kelembaban Kapasitif V2.0 bertindak sebagai detektor tetesan air hujan tahan korosi di atas box. Disuplai mandiri oleh baterai 4S Li-ion 18650 melalui Buck Converter 14.8V ➔ 5V.'}
           </p>
+
+          {/* Pinout and Hardware Summary Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4 text-xs font-mono">
+            <div className={`p-3 rounded-xl border ${themeInnerCard} flex flex-col justify-between`}>
+              <div className="flex items-center justify-between text-[10px] mb-1">
+                <span className="text-emerald-400 font-bold">ESP32 WROOM 32D</span>
+                <span className="text-[9px] text-slate-400">STANDALONE</span>
+              </div>
+              <div className="space-y-1 text-[10px] text-slate-300">
+                <div>• <span className="text-amber-400">GPIO05</span>: TRIG JSN-SR04T</div>
+                <div>• <span className="text-amber-400">GPIO18</span>: ECHO JSN-SR04T</div>
+                <div>• <span className="text-purple-400">GPIO34</span>: SOIL AO (Hujan)</div>
+              </div>
+            </div>
+
+            <div className={`p-3 rounded-xl border ${themeInnerCard} flex flex-col justify-between`}>
+              <div className="flex items-center justify-between text-[10px] mb-1">
+                <span className="text-pink-400 font-bold">CAPACITIVE V2.0</span>
+                <span className="text-[9px] text-slate-400">DETEKTOR HUJAN</span>
+              </div>
+              <div className="text-[10px] text-slate-300 leading-snug">
+                Ditempatkan di bagian luar wadah mendeteksi tetesan hujan. Bebas karat polimer (menggantikan FC-37 biasa).
+              </div>
+            </div>
+
+            <div className={`p-3 rounded-xl border ${themeInnerCard} flex flex-col justify-between`}>
+              <div className="flex items-center justify-between text-[10px] mb-1">
+                <span className="text-cyan-400 font-bold">POWER SUPPLY 4S</span>
+                <span className="text-[9px] text-slate-400">14.8V ➔ 5V</span>
+              </div>
+              <div className="text-[10px] text-slate-300 leading-snug">
+                4x 18650 Li-ion seri (14.8V) di-step-down oleh Buck Converter menjadi 5.0V teregulasi untuk ESP32 & sensor.
+              </div>
+            </div>
+          </div>
 
           <div className="space-y-3">
             <div className={`p-3 rounded-xl border ${themeInnerCard} flex flex-col sm:flex-row sm:items-center justify-between gap-2 font-mono text-[11px]`}>
@@ -961,13 +1000,17 @@ export default function AdminPanel({
             </div>
 
             <div className={`p-3 rounded-xl border ${themeInnerCard} font-mono text-[10px] space-y-1`}>
-              <span className={`text-[9px] uppercase tracking-wider ${themeLabel} block`}>
-                {language === 'en' ? 'JSON Payload Format from ESP32:' : 'Format Payload JSON dari ESP32:'}
-              </span>
+              <div className="flex items-center justify-between">
+                <span className={`text-[9px] uppercase tracking-wider ${themeLabel} block`}>
+                  {language === 'en' ? 'JSON Payload Format from ESP32:' : 'Format Payload JSON dari ESP32:'}
+                </span>
+                <span className="text-[9px] text-emerald-400 font-bold">HTTPClient.h (Wi-Fi Native)</span>
+              </div>
               <pre className="text-emerald-400 bg-black/60 p-2.5 rounded-lg overflow-x-auto text-[10px] leading-relaxed">
 {`{
   "node_id": "node-kukusan-01",
-  "distances": [180.5, 180.2, 179.9, ... 360 samples ...]
+  "distances": [180.5, 180.2, 179.9, ... 360 sampel ...],
+  "local_rain": 0 // 0: Kering, 1: Tetesan Hujan, 2: Basah Presipitasi
 }`}
               </pre>
             </div>

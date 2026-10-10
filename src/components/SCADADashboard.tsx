@@ -43,7 +43,8 @@ import {
   CheckCircle2,
   RotateCcw,
   ShieldCheck,
-  Zap
+  Zap,
+  X
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -57,29 +58,8 @@ import {
   ReferenceLine 
 } from 'recharts';
 
-/**
- * Extracts a numeric timestamp (milliseconds) from various Firestore field formats
- * (e.g. number, Timestamp object, ISO date string) checking timestamp, updated_at, or created_at.
- */
-export function extractReadingTimestamp(data: any): number | null {
-  if (!data) return null;
-  const raw = data.timestamp ?? data.updated_at ?? data.created_at;
-  if (raw === undefined || raw === null) return null;
-  if (typeof raw === 'number') {
-    return raw < 10000000000 ? raw * 1000 : raw;
-  }
-  if (typeof raw?.toMillis === 'function') {
-    return raw.toMillis();
-  }
-  if (typeof raw?.toDate === 'function') {
-    return raw.toDate().getTime();
-  }
-  if (typeof raw === 'string') {
-    const parsed = Date.parse(raw);
-    if (!isNaN(parsed)) return parsed;
-  }
-  return null;
-}
+import { extractReadingTimestamp, normalizeSensorReading } from '../utils/readingUtils';
+export { extractReadingTimestamp, normalizeSensorReading };
 
 export function translateConditionToEn(c: string): string {
   if (!c) return 'Partly Cloudy';
@@ -229,11 +209,12 @@ export default function SCADADashboard({
   const [chartRange, setChartRange] = useState<'realtime' | '24h'>('realtime');
   const [chartViewMode, setChartViewMode] = useState<'elevation' | 'raw_ultrasonic'>('elevation');
   const [useBatch360Mode, setUseBatch360Mode] = useState<boolean>(false);
+  const [showWiringModal, setShowWiringModal] = useState<boolean>(false);
   const [timeAgoText, setTimeAgoText] = useState<string>(language === 'en' ? 'Waiting for readings...' : 'Menunggu pembacaan data...');
 
-  // Hardware status timeout detection: 8 minutes tolerance (480,000 ms)
-  // ESP32 sends batch data every 6 minutes; if gap > 8 mins, hardware is offline
-  const TIMEOUT_TOLERANCE_MS = 8 * 60 * 1000; // 480.000 ms (8 menit)
+  // Hardware status timeout detection: 15 minutes tolerance (900,000 ms)
+  // ESP32 SoilWake transmits batch data every 6-8 minutes; 15 mins accommodates deep sleep & retry
+  const TIMEOUT_TOLERANCE_MS = 15 * 60 * 1000; // 900.000 ms (15 menit)
   const [isDeviceOffline, setIsDeviceOffline] = useState<boolean>(false);
 
   // Client-Side Timeout Check running every 10 seconds
@@ -255,7 +236,7 @@ export default function SCADADashboard({
         return;
       }
       const now = Date.now();
-      const diffMs = now - readingTs;
+      const diffMs = Math.max(0, now - readingTs);
       const timedOut = diffMs > TIMEOUT_TOLERANCE_MS;
       setIsDeviceOffline(timedOut);
     };
@@ -428,14 +409,10 @@ export default function SCADADashboard({
       (snapshot) => {
         setHasReceivedReadingsSnapshot(true);
         const data: SensorReading[] = [];
+        const refH = config?.reference_height || 300;
         snapshot.forEach((doc) => {
-          const docData = doc.data();
-          const parsedTs = extractReadingTimestamp(docData);
-          data.push({ 
-            id: doc.id, 
-            ...docData,
-            timestamp: parsedTs ?? (docData.timestamp || Date.now())
-          } as SensorReading);
+          const normalized = normalizeSensorReading(doc.id, doc.data(), refH);
+          data.push(normalized);
         });
         // Sort ascending for chart
         const sorted = data.sort((a, b) => a.timestamp - b.timestamp);
@@ -949,14 +926,9 @@ export default function SCADADashboard({
 
       let exportList: SensorReading[] = [];
       if (snap && !snap.empty) {
+        const refH = config?.reference_height || 300;
         snap.forEach((d) => {
-          const docData = d.data();
-          const parsedTs = extractReadingTimestamp(docData);
-          exportList.push({
-            id: d.id,
-            ...docData,
-            timestamp: parsedTs ?? (docData.timestamp || Date.now())
-          } as SensorReading);
+          exportList.push(normalizeSensorReading(d.id, d.data(), refH));
         });
         exportList.sort((a, b) => a.timestamp - b.timestamp);
       } else if (readingsList.length > 0) {
@@ -973,20 +945,20 @@ export default function SCADADashboard({
         return;
       }
 
-      const headers = ['Timestamp', 'Waktu Lokal', 'Elevasi Air (cm)', 'Suhu (C)', 'Kelembapan (%)', 'Hujan Lokal', 'Sumber Data', 'Jarak Sensor (cm)'];
+      const headers = ['Timestamp', 'Waktu Lokal', 'Elevasi Air (cm)', 'Jarak Sensor JSN-SR04T (cm)', 'Deteksi Tetesan Hujan (Capacitive V2.0)', 'Sumber Data', 'Suhu BMKG (C)', 'Kelembapan BMKG (%)'];
       const rows = exportList.map(r => {
         const dateStr = new Date(r.timestamp).toISOString();
         const localTimeStr = new Date(r.timestamp).toLocaleString('id-ID');
-        const rainLabel = r.local_rain === 0 ? 'Kering' : r.local_rain === 1 ? 'Ringan' : r.local_rain === 2 ? 'Sedang' : 'Lebat';
+        const rainLabel = r.local_rain === 0 ? 'Kering / Cerah' : r.local_rain === 1 ? 'Tetesan Hujan' : r.local_rain === 2 ? 'Basah Presipitasi' : 'Hujan Lebat';
         return [
           dateStr,
           `"${localTimeStr}"`,
           r.water_level,
-          r.temperature,
-          r.humidity,
+          r.distance ?? '',
           `"${rainLabel}"`,
           `"${r.source || 'Hardware-ESP32'}"`,
-          r.distance ?? ''
+          r.temperature,
+          r.humidity
         ];
       });
 
@@ -1022,10 +994,10 @@ export default function SCADADashboard({
 
   // Despiking helper: detects isolated single-reading spikes caused by ultrasonic acoustic reflections
   const cleanReadings = activeReadings.map((r, i, arr) => {
-    let elev = r.water_level;
+    let elev = typeof r.water_level === 'number' ? r.water_level : 0;
     const ultrasonicDistance = typeof r.distance === 'number' 
       ? r.distance 
-      : Math.max(0, Math.round((refHeight - r.water_level) * 10) / 10);
+      : Math.max(0, Math.round((refHeight - elev) * 10) / 10);
 
     // Automatic signal conditioning: filter out isolated obstacle spikes (e.g. 109cm/195cm reflections)
     // when neighboring data points are consistent, keeping the hydrograph true to physical reality
@@ -1212,7 +1184,7 @@ export default function SCADADashboard({
               <span className={`text-[11px] ${themeTextSub} mt-2 font-sans flex items-center gap-1.5`}>
                 {isDeviceOffline ? (
                   <span className="text-slate-400 font-mono">
-                    {language === 'en' ? 'Device offline (>8 mins). Telemetry paused on standby.' : 'Perangkat offline (>8 mnt). Data telemetri terakhir dibekukan.'}
+                    {language === 'en' ? 'Device offline (>15 mins). Telemetry paused on standby.' : 'Perangkat offline (>15 mnt). Data telemetri terakhir dibekukan.'}
                   </span>
                 ) : (
                   <>
@@ -1230,7 +1202,7 @@ export default function SCADADashboard({
                         ? `Sensor Gap: ${latestReading.distance} cm (${latestReading.source || 'RTU'})`
                         : `Jarak Pantul Sensor: ${latestReading.distance} cm (${latestReading.source || 'RTU'})`
                     ) : (
-                      language === 'en' ? 'Fluctuation: ±0.4 cm (Temp Compensated)' : 'Fluktuasi: ±0.4 cm (Kompensasi Suhu)'
+                      language === 'en' ? 'Ultrasonic Echo Precision: ±0.1 cm' : 'Presisi Echo Ultrasonik: ±0.1 cm'
                     )}
                   </>
                 )}
@@ -1250,7 +1222,7 @@ export default function SCADADashboard({
             
             {/* 1. Bridge/Beam concrete ceiling & Sensor Probe */}
             <div className="absolute top-0 left-0 right-0 h-7 bg-zinc-700 border-b border-zinc-600 flex items-center justify-center z-10 shadow-sm">
-              <span className="text-[7px] font-mono text-zinc-300 tracking-widest uppercase">BRIDGE MOUNTING BEAM</span>
+              <span className="text-[7px] font-mono text-zinc-300 tracking-widest uppercase">TIANG PIPA & LENGAN BOOM DRAINASE KUKUSAN</span>
               
               {/* JSN-SR04T Sensor Probe Visual */}
               <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 w-10 h-5 bg-zinc-800 rounded-b-md border-x border-b border-zinc-600 flex justify-around items-center px-1">
@@ -1837,137 +1809,344 @@ export default function SCADADashboard({
 
         </div>
 
-        {/* SENSOR FUSI LOKAL (Membentang Persegi Panjang Sejajar di Bawah 4 Horizon) */}
-        <div id="climate-gauge" style={{ height: '327.836px' }} className={`${themeCard} rounded-2xl p-6 border ${themeBorder} flex flex-col justify-between`}>
+        {/* SENSOR TELEMETRI RANGKAIAN HARDWARE RTU // ESP32 WROOM 32D (Membentang Persegi Panjang Sejajar di Bawah 4 Horizon) */}
+        <div id="climate-gauge" className={`${themeCard} rounded-2xl p-6 border ${themeBorder} flex flex-col justify-between min-h-[310px]`}>
           {/* Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3.5 border-b border-white/5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3.5 border-b border-white/5">
             <div className="flex items-center gap-2.5">
-              <div className={`p-2.5 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-100 border-slate-200'} rounded-xl text-[#3B82F6]`}>
+              <div className={`p-2.5 ${isDark ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-emerald-50 border-emerald-200 text-emerald-600'} rounded-xl border`}>
                 <Cpu className="w-5 h-5" />
               </div>
               <div>
                 <span className={`text-[10px] font-bold uppercase tracking-[0.25em] ${themeTextMuted} font-mono block`}>
-                  {language === 'en' ? 'Local Sensor Fusion & Acoustic Compensation' : 'Sensor Fusi Lokal & Kompensasi Akustik'}
+                  {language === 'en' ? 'RTU Hardware Circuit & Telemetry' : 'Telemetri Rangkaian Hardware RTU'}
                 </span>
-                <span className="text-[9px] font-mono text-slate-400">
-                  {language === 'en' ? 'RTU Micro-Climate Telemetry // Real-time JSN-SR04T ToF Correction' : 'Telemetri Mikro-Klimatologi RTU // Koreksi ToF JSN-SR04T Real-time'}
+                <span className="text-[10px] font-mono text-slate-400">
+                  {language === 'en' 
+                    ? 'ESP32 WROOM 32D Standalone • Native Wi-Fi • No Arduino • No SIM Module' 
+                    : 'ESP32 WROOM 32D Mandiri • Wi-Fi Terintegrasi • Tanpa Arduino • Tanpa Modul SIM'}
                 </span>
               </div>
             </div>
             
             <div className="flex items-center gap-2 font-mono text-[9px]">
-              <span className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full flex items-center gap-1.5 font-bold">
+              <button
+                type="button"
+                onClick={() => setShowWiringModal(true)}
+                className={`px-3 py-1.5 rounded-lg border flex items-center gap-1.5 font-bold transition-all cursor-pointer ${
+                  isDark
+                    ? 'bg-blue-500/10 hover:bg-blue-500/20 border-blue-500/30 text-blue-400'
+                    : 'bg-blue-50 hover:bg-blue-100 border-blue-200 text-blue-600'
+                }`}
+                title={language === 'en' ? 'View physical hardware wiring & pinout schematic' : 'Lihat skema diagram rangkaian & pinout hardware fisik'}
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>{language === 'en' ? 'Wiring Schematic' : 'Skema Rangkaian Proyek'}</span>
+              </button>
+              <span className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-lg flex items-center gap-1.5 font-bold">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                {language === 'en' ? 'Acoustic Correction Active' : 'Koreksi Akustik Aktif'}
+                {language === 'en' ? 'Hardware Ready' : 'Rangkaian Siap'}
               </span>
             </div>
           </div>
 
-          {/* 4 Sensor Cards filling the vertical and horizontal space */}
+          {/* 4 Identical, Symmetrical Sensor / Hardware Block Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 flex-1 py-3.5">
-            {/* 1. Hujan Lokal */}
+            {/* 1. Detektor Hujan Kapasitif (Capacitive Moisture Sensor V2.0) */}
             <div className={`flex flex-col justify-between ${themeBgInner} rounded-xl p-4 border border-white/5 shadow-inner`}>
               <div className="flex items-center justify-between">
-                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider`}>
-                  {language === 'en' ? 'Local Rain' : 'Hujan Lokal'}
+                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider font-semibold`}>
+                  {language === 'en' ? 'Raindrop Detection' : 'Deteksi Tetesan Hujan'}
                 </span>
-                <div className="p-1.5 rounded-lg bg-blue-500/10 text-[#3B82F6]">
+                <div className="p-1.5 rounded-lg bg-pink-500/10 text-pink-400 border border-pink-500/20">
                   <CloudRain className="w-4 h-4" />
                 </div>
               </div>
               <div className="my-auto py-2">
-                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight`}>
+                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight block`}>
                   {latestReading ? (
-                    latestReading.local_rain === 0 ? (language === 'en' ? 'Dry' : 'Kering') :
-                    latestReading.local_rain === 1 ? (language === 'en' ? 'Light' : 'Ringan') :
-                    latestReading.local_rain === 2 ? (language === 'en' ? 'Moderate' : 'Sedang') : (language === 'en' ? 'Heavy' : 'Lebat')
-                  ) : (language === 'en' ? 'Dry' : 'Kering')}
+                    latestReading.local_rain === 0 ? (language === 'en' ? 'Dry / Clear' : 'Kering / Cerah') :
+                    latestReading.local_rain === 1 ? (language === 'en' ? 'Rain Droplets' : 'Tetesan Hujan') :
+                    latestReading.local_rain === 2 ? (language === 'en' ? 'Wet Droplets' : 'Basah Presipitasi') : (language === 'en' ? 'Heavy Rain' : 'Hujan Lebat')
+                  ) : (language === 'en' ? 'Dry / Clear' : 'Kering / Cerah')}
+                </span>
+                <span className="text-[10px] text-slate-400 font-sans mt-0.5 block truncate">
+                  {language === 'en' ? 'Probe detects drops (anti-corrosion)' : 'Probe kapasitif deteksi tetesan air'}
                 </span>
               </div>
               <div className="flex items-center justify-between text-[9px] font-mono pt-2 border-t border-white/5 text-slate-400">
-                <span>FC-37 AO</span>
+                <span className="text-pink-400 font-bold">GPIO34 (SOIL AO)</span>
                 <span className={latestReading && latestReading.local_rain > 0 ? 'text-amber-400 font-bold' : 'text-emerald-400 font-semibold'}>
-                  {latestReading && latestReading.local_rain > 0 ? (language === 'en' ? 'PRECIPITATION' : 'PRESIPITASI') : (language === 'en' ? 'NORMAL' : 'NORMAL')}
+                  CAPACITIVE V2.0
                 </span>
               </div>
             </div>
 
-            {/* 2. Suhu Udara Lingkungan */}
+            {/* 2. Sensor Muka Air Ultrasonik (JSN-SR04T Waterproof) */}
             <div className={`flex flex-col justify-between ${themeBgInner} rounded-xl p-4 border border-white/5 shadow-inner`}>
               <div className="flex items-center justify-between">
-                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider`}>
-                  {language === 'en' ? 'Ambient Temp' : 'Suhu Ambient'}
+                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider font-semibold`}>
+                  {language === 'en' ? 'Water Surface Distance' : 'Jarak Pantul Sensor'}
                 </span>
-                <div className="p-1.5 rounded-lg bg-amber-500/10 text-amber-400">
-                  <Thermometer className="w-4 h-4" />
+                <div className="p-1.5 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                  <Radio className="w-4 h-4" />
                 </div>
               </div>
               <div className="my-auto py-2">
-                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight`}>
-                  {latestReading ? `${latestReading.temperature}°C` : '--°C'}
+                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight block`}>
+                  {latestReading?.distance != null ? (
+                    `${latestReading.distance} cm`
+                  ) : (
+                    `${Math.max(0, Math.round(((config?.reference_height || 300) - (latestReading?.water_level || 0)) * 10) / 10)} cm`
+                  )}
+                </span>
+                <span className="text-[10px] text-slate-400 font-sans mt-0.5 block truncate">
+                  {language === 'en' ? 'Ultrasonic ToF over drain boom' : 'Waktu pantul gema ToF air'}
                 </span>
               </div>
               <div className="flex items-center justify-between text-[9px] font-mono pt-2 border-t border-white/5 text-slate-400">
-                <span>DHT22</span>
-                <span className="text-amber-400 font-bold">{language === 'en' ? 'NTC THERMISTOR' : 'TERMISTOR NTC'}</span>
+                <span className="text-amber-400 font-bold">GPIO05(T) • GPIO18(E)</span>
+                <span className="text-emerald-400 font-semibold">JSN-SR04T</span>
               </div>
             </div>
 
-            {/* 3. Kelembaban Udara */}
+            {/* 3. Catu Daya Mandiri (4S Li-ion 18650 & Buck Converter 14.8V -> 5V) */}
             <div className={`flex flex-col justify-between ${themeBgInner} rounded-xl p-4 border border-white/5 shadow-inner`}>
               <div className="flex items-center justify-between">
-                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider`}>
-                  {language === 'en' ? 'Humidity' : 'Kelembaban'}
+                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider font-semibold`}>
+                  {language === 'en' ? 'Power Supply & Buck' : 'Catu Daya Baterai & Buck'}
                 </span>
-                <div className="p-1.5 rounded-lg bg-sky-500/10 text-sky-400">
-                  <Percent className="w-4 h-4" />
+                <div className="p-1.5 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+                  <Battery className="w-4 h-4" />
                 </div>
               </div>
               <div className="my-auto py-2">
-                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight`}>
-                  {latestReading ? `${latestReading.humidity}%` : '--%'}
+                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight block`}>
+                  14.8V <span className="text-sm font-normal text-cyan-400">➔</span> 5.0V
+                </span>
+                <span className="text-[10px] text-slate-400 font-sans mt-0.5 block truncate">
+                  {language === 'en' ? 'Regulated step-down converter' : 'Regulasi Buck Converter stabil'}
                 </span>
               </div>
               <div className="flex items-center justify-between text-[9px] font-mono pt-2 border-t border-white/5 text-slate-400">
-                <span>DHT22</span>
-                <span className="text-sky-400 font-bold">{language === 'en' ? 'CAPACITIVE RH' : 'KAPASITIF RH'}</span>
+                <span className="text-cyan-400 font-bold">4S 18650 LI-ION</span>
+                <span className="text-emerald-400 font-semibold">BUCK CONVERTER</span>
               </div>
             </div>
 
-            {/* 4. Kompensasi Kecepatan Suara ToF */}
-            <div className={`flex flex-col justify-between ${isDark ? 'bg-black/40 border-white/5' : 'bg-slate-100 border-slate-200'} rounded-xl p-4 border shadow-inner`}>
+            {/* 4. Unit Kendali RTU (ESP32 WROOM 32D Mandiri) */}
+            <div className={`flex flex-col justify-between ${themeBgInner} rounded-xl p-4 border border-white/5 shadow-inner`}>
               <div className="flex items-center justify-between">
-                <span className={`text-[10px] ${themeTextMuted} font-mono uppercase tracking-wider`}>
-                  {language === 'en' ? 'Speed of Sound (Vs)' : 'Kecepatan Suara (Vs)'}
+                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider font-semibold`}>
+                  {language === 'en' ? 'RTU Microcontroller' : 'Mikrokontroler RTU'}
                 </span>
-                <div className="p-1.5 rounded-lg bg-blue-500/10 text-[#3B82F6]">
+                <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                   <Cpu className="w-4 h-4" />
                 </div>
               </div>
               <div className="my-auto py-2">
-                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight`}>
-                  {latestReading ? (331.3 + 0.606 * latestReading.temperature).toFixed(1) : '343.4'} <span className="text-xs font-normal text-slate-400">m/s</span>
+                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight block`}>
+                  ESP32 WROOM
+                </span>
+                <span className="text-[10px] text-slate-400 font-sans mt-0.5 block truncate">
+                  {language === 'en' ? 'Wi-Fi native • Deep-Sleep cycle' : 'Wi-Fi internal • Siklus sleep'}
                 </span>
               </div>
               <div className="flex items-center justify-between text-[9px] font-mono pt-2 border-t border-white/5 text-slate-400">
-                <span>JSN-SR04T</span>
-                <span className="text-emerald-400 font-bold tracking-tight">±0.05 cm</span>
+                <span className="text-emerald-400 font-bold">32D DUAL-CORE</span>
+                <span className="text-[#3B82F6] font-semibold">{language === 'en' ? 'NO ARDUINO / SIM' : 'TANPA ARDUINO & SIM'}</span>
               </div>
             </div>
           </div>
 
-          {/* Footer formula bar */}
-          <div className={`pt-3 border-t border-white/5 flex flex-col sm:flex-row items-start sm:items-center justify-between text-[9.5px] font-mono ${themeTextMuted} gap-1`}>
-            <span>
-              {language === 'en' ? 'Formula: ' : 'Formula: '}<strong className={isDark ? 'text-white/80' : 'text-slate-700'}>Vs = 331.3 + 0.606 × T</strong> m/s
-            </span>
-            <span>
-              {language === 'en'
-                ? 'Continuously compensating JSN-SR04T ultrasonic wave propagation deviation'
-                : 'Mengoreksi deviasi gelombang ultrasonik JSN-SR04T secara kontinu'}
-            </span>
+          {/* Footer Specification Bar */}
+          <div className={`pt-3 border-t border-white/5 flex flex-col sm:flex-row items-start sm:items-center justify-between text-[9.5px] font-mono ${themeTextMuted} gap-1.5`}>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-slate-400 font-bold uppercase">{language === 'en' ? 'Circuit Wiring:' : 'Skema Rangkaian:'}</span>
+              <span className={isDark ? 'text-white/80' : 'text-slate-700'}>
+                ESP32 WROOM 32D • JSN-SR04T (GPIO05/18) • Capacitive Rain V2.0 (GPIO34) • Buck 14.8V➔5V • 4S Li-ion
+              </span>
+            </div>
+            <div className="flex items-center gap-1 text-slate-400">
+              <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+              <span>{language === 'en' ? 'Capacitive probe mounted on housing to detect raindrops (anti-corrosion)' : 'Sensor kelembaban kapasitif dipasang di atas box untuk mendeteksi tetesan hujan (bebas korosi)'}</span>
+            </div>
           </div>
         </div>
+
+      {/* MODAL SKEMA RANGKAIAN HARDWARE RTU SIMBA */}
+      {showWiringModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in overflow-y-auto">
+          <div className={`w-full max-w-4xl my-auto ${isDark ? 'bg-[#0D0D0F] border-white/10 text-white' : 'bg-white border-slate-200 text-slate-800 shadow-2xl'} rounded-2xl p-6 sm:p-8 border relative`}>
+            {/* Modal Close Button */}
+            <button
+              type="button"
+              onClick={() => setShowWiringModal(false)}
+              className={`absolute top-5 right-5 p-2 rounded-xl border ${
+                isDark ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-400' : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-600'
+              } transition-all cursor-pointer`}
+              title={language === 'en' ? 'Close' : 'Tutup'}
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            {/* Modal Header */}
+            <div className="flex items-center gap-3 mb-6 pb-4 border-b border-white/10">
+              <div className="p-2.5 rounded-xl bg-blue-500/10 border border-blue-500/20 text-[#3B82F6]">
+                <Cpu className="w-6 h-6" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold font-sans tracking-tight">
+                  {language === 'en' ? 'SIMBA RTU Hardware Wiring & Component Architecture' : 'Skema Rangkaian Hardware & Arsitektur Komponen RTU SIMBA'}
+                </h2>
+                <p className="text-xs text-slate-400 font-mono mt-0.5">
+                  {language === 'en'
+                    ? 'Real Presentation Design • Kukusan Drainage Monitoring Unit'
+                    : 'Desain Rangkaian Proyek Capstone • Pos Monitoring Drainase Kukusan'}
+                </p>
+              </div>
+            </div>
+
+            {/* Visual Component Diagram Layout matching the uploaded presentation diagram */}
+            <div className={`p-5 rounded-2xl border ${isDark ? 'bg-black/60 border-white/10' : 'bg-slate-50 border-slate-200'} mb-6`}>
+              <div className="text-[10px] font-mono uppercase tracking-widest text-slate-400 mb-4 flex items-center justify-between">
+                <span className="font-bold">{language === 'en' ? 'ENCLOSURE COMPONENT LAYOUT & PIN CONNECTIONS' : 'TATA LETAK KOMPONEN DALAM BOX ENCLOSURE & KONEKSI PIN'}</span>
+                <span className="text-emerald-400 font-bold">100% STANDALONE RTU</span>
+              </div>
+
+              {/* Component Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                
+                {/* Cyan: Buck Converter */}
+                <div className="p-4 rounded-xl border border-cyan-500/40 bg-cyan-950/20 flex flex-col justify-between">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-bold text-cyan-400 font-mono uppercase">BUCK CONVERTER 14.8V ➔ 5V</span>
+                    <span className="px-2 py-0.5 rounded text-[9px] font-mono bg-cyan-500/20 text-cyan-300 font-bold">DC-DC STEP-DOWN</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 mb-3 leading-relaxed">
+                    Menurunkan tegangan tinggi 14.8V (baterai) menjadi 5.0V DC stabil untuk menyuplai ESP32 dan modul-modul sensor.
+                  </p>
+                  <div className="grid grid-cols-2 gap-2 text-[10px] font-mono pt-2 border-t border-cyan-500/20">
+                    <span className="text-rose-400 font-bold">VIN+ : 14.8V Bat (+)</span>
+                    <span className="text-slate-400 font-bold">VIN- : Bat (-)</span>
+                    <span className="text-rose-400 font-bold">VOUT+ : 5V Rail</span>
+                    <span className="text-slate-400 font-bold">VOUT- : Common GND</span>
+                  </div>
+                </div>
+
+                {/* Green: ESP32 WROOM 32D */}
+                <div className="p-4 rounded-xl border border-emerald-500/40 bg-emerald-950/20 flex flex-col justify-between">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-bold text-emerald-400 font-mono uppercase">ESP32 WROOM 32D</span>
+                    <span className="px-2 py-0.5 rounded text-[9px] font-mono bg-emerald-500/20 text-emerald-300 font-bold">CORE RTU</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 mb-3 leading-relaxed">
+                    Mikrokontroler 32-bit dual-core mandiri dengan Wi-Fi bawaan. Bekerja tanpa bantuan Arduino dan tanpa modul SIM GSM!
+                  </p>
+                  <div className="grid grid-cols-3 gap-1.5 text-[10px] font-mono pt-2 border-t border-emerald-500/20">
+                    <span className="text-purple-400 font-bold">GPIO34 : SOIL AO</span>
+                    <span className="text-amber-400 font-bold">GPIO05 : TRIG</span>
+                    <span className="text-amber-400 font-bold">GPIO18 : ECHO</span>
+                  </div>
+                </div>
+
+                {/* White: 4 Li-ion Batteries */}
+                <div className="p-4 rounded-xl border border-slate-300/40 bg-white/5 flex flex-col justify-between">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-bold text-slate-200 font-mono uppercase">4 LI-ION BATTERIES (4S 18650)</span>
+                    <span className="px-2 py-0.5 rounded text-[9px] font-mono bg-white/10 text-slate-200 font-bold">OFF-GRID POWER</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 mb-3 leading-relaxed">
+                    4 sel baterai 18650 dihubungkan secara seri menghasilkan nominal 14.8V (hingga 16.8V full charge) untuk catu daya mandiri di tiang lapangan.
+                  </p>
+                  <div className="flex items-center justify-between text-[10px] font-mono pt-2 border-t border-white/10 text-slate-400">
+                    <span>Konfigurasi: 4S 1P</span>
+                    <span className="text-emerald-400 font-bold">14.8V NOMINAL</span>
+                  </div>
+                </div>
+
+                {/* Pink: Capacitive Soil Moisture Sensor V2.0 */}
+                <div className="p-4 rounded-xl border border-pink-500/40 bg-pink-950/20 flex flex-col justify-between">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-bold text-pink-400 font-mono uppercase">CAPACITIVE SENSOR V2.0</span>
+                    <span className="px-2 py-0.5 rounded text-[9px] font-mono bg-pink-500/20 text-pink-300 font-bold">DETEKTOR HUJAN</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 mb-3 leading-relaxed">
+                    <strong className="text-pink-300">Penting:</strong> Sensor ini <span className="underline">tidak ditancapkan di tanah</span>, melainkan dipasang menghadap ke atas/luar wadah untuk mendeteksi tetesan air hujan. Menggunakan metode kapasitif berisolasi polimer sehingga <span className="text-pink-300">bebas karat / anti-korosi</span> dibandingkan FC-37!
+                  </p>
+                  <div className="grid grid-cols-3 gap-1 text-[10px] font-mono pt-2 border-t border-pink-500/20">
+                    <span className="text-rose-400">VCC : 5V</span>
+                    <span className="text-slate-400">GND : GND</span>
+                    <span className="text-purple-400 font-bold">AO : GPIO34</span>
+                  </div>
+                </div>
+
+                {/* Yellow: JSN-SR04T Waterproof Ultrasonic Sensor */}
+                <div className="p-4 rounded-xl border border-amber-500/40 bg-amber-950/20 flex flex-col justify-between md:col-span-2">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-bold text-amber-400 font-mono uppercase">JSN-SR04T WATERPROOF ULTRASONIC TRANSDUCER</span>
+                    <span className="px-2 py-0.5 rounded text-[9px] font-mono bg-amber-500/20 text-amber-300 font-bold">SENSOR MUKA AIR DRAINASE</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 mb-3 leading-relaxed">
+                    Transduser kedap air yang dipasang pada lengan pipa boom PVC menjorok di atas saluran drainase Kukusan. Memancarkan pulsa ultrasonik 40kHz dan mendeteksi pantulan gema dari permukaan air untuk menghitung elevasi air secara kontinu (20 cm - 300 cm).
+                  </p>
+                  <div className="grid grid-cols-4 gap-2 text-[10px] font-mono pt-2 border-t border-amber-500/20">
+                    <span className="text-rose-400 font-bold">VCC : 5V</span>
+                    <span className="text-slate-400 font-bold">GND : GND</span>
+                    <span className="text-amber-400 font-bold">TRIG : GPIO05</span>
+                    <span className="text-amber-400 font-bold">ECHO : GPIO18</span>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+            {/* 3 Pillars Explanations */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs mb-6 font-sans">
+              <div className={`p-3.5 rounded-xl border ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
+                <div className="flex items-center gap-2 mb-1.5 font-bold text-[#3B82F6]">
+                  <CheckCircle2 className="w-4 h-4 text-[#3B82F6] shrink-0" />
+                  <span>Tanpa Arduino & SIM</span>
+                </div>
+                <p className="text-slate-400 text-[11px] leading-relaxed">
+                  ESP32 WROOM 32D sudah memiliki prosesor mandiri berkekuatan tinggi serta radio Wi-Fi terintegrasi. Tidak diperlukan Arduino eksternal maupun kartu SIM seluler.
+                </p>
+              </div>
+
+              <div className={`p-3.5 rounded-xl border ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
+                <div className="flex items-center gap-2 mb-1.5 font-bold text-pink-400">
+                  <CheckCircle2 className="w-4 h-4 text-pink-400 shrink-0" />
+                  <span>Soil Sensor Sebagai Detektor Hujan</span>
+                </div>
+                <p className="text-slate-400 text-[11px] leading-relaxed">
+                  Sensor kelembaban tanah kapasitif ditaruh di atas box untuk mendeteksi kebasahan akibat tetesan hujan. Berbeda dengan pelat FC-37 yang mudah berkarat, sensor kapasitif ini tahan cuaca ekstrem.
+                </p>
+              </div>
+
+              <div className={`p-3.5 rounded-xl border ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
+                <div className="flex items-center gap-2 mb-1.5 font-bold text-emerald-400">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>Tanpa DHT22 (Fusi Cuaca BMKG)</span>
+                </div>
+                <p className="text-slate-400 text-[11px] leading-relaxed">
+                  Tidak ada modul DHT22 di dalam box. Data suhu, kelembaban makro, dan prediksi cuaca diintegrasikan secara cerdas dari API resmi Stasiun Klimatologi BMKG Kukusan/Beji.
+                </p>
+              </div>
+            </div>
+
+            {/* Close button */}
+            <div className="flex justify-end pt-2 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => setShowWiringModal(false)}
+                className="px-5 py-2.5 rounded-xl bg-[#3B82F6] hover:bg-blue-600 text-black font-bold text-xs font-mono transition-all cursor-pointer shadow-lg"
+              >
+                {language === 'en' ? 'Close Diagram' : 'Tutup Skema Rangkaian'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       </div>
 

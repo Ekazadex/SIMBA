@@ -21,6 +21,7 @@ import {
   limit
 } from 'firebase/firestore';
 import { SystemConfig, SensorReading } from './types';
+import { extractReadingTimestamp } from './utils/readingUtils';
 import SCADADashboard from './components/SCADADashboard';
 import AdminPanel from './components/AdminPanel';
 import { 
@@ -231,16 +232,14 @@ export default function App() {
       setLatestLevel(0);
     }
     if (reading) {
-      let ts = reading.timestamp ?? (reading as any).updated_at ?? (reading as any).created_at;
-      if (typeof ts === 'number') {
-        setLatestReadingTs(ts < 10000000000 ? ts * 1000 : ts);
-      }
+      const ts = extractReadingTimestamp(reading);
+      setLatestReadingTs(ts ?? Date.now());
     } else {
       setLatestReadingTs(null);
     }
   }, []);
 
-  // 10 seconds interval check to determine if hardware is offline (> 8 mins)
+  // 10 seconds interval check to determine if hardware is offline (> 15 mins)
   useEffect(() => {
     const checkTimeout = () => {
       if (!latestReading || !latestReadingTs) {
@@ -253,8 +252,8 @@ export default function App() {
         setIsAppDeviceOffline(false);
         return;
       }
-      const diffMs = Date.now() - latestReadingTs;
-      setIsAppDeviceOffline(diffMs > 8 * 60 * 1000); // 480.000 ms
+      const diffMs = Math.max(0, Date.now() - latestReadingTs);
+      setIsAppDeviceOffline(diffMs > 15 * 60 * 1000); // 15 mins (900,000 ms)
     };
     checkTimeout();
     const interval = setInterval(checkTimeout, 10000);
@@ -695,8 +694,8 @@ export default function App() {
       }`}>
         <p className="max-w-7xl mx-auto px-4">
           {language === 'en'
-            ? 'CAPSTONE PROJECT GROUP 12 • JSN-SR04T ULTRASONIC & BMKG WEATHER DATA FUSION • DEEP LEARNING MODEL PREDICTION'
-            : 'PROYEK CAPSTONE KELOMPOK 12 • FUSI DATA ULTRASONIK JSN-SR04T & CUACA BMKG • PREDIKSI MODEL DEEP LEARNING'}
+            ? 'CAPSTONE PROJECT GROUP 12 • JSN-SR04T ULTRASONIC & CAPACITIVE RAIN PROBE • ESP32 STANDALONE RTU • BMKG WEATHER FUSION'
+            : 'PROYEK CAPSTONE KELOMPOK 12 • SENSOR ULTRASONIK JSN-SR04T & DETEKTOR HUJAN KAPASITIF • RTU ESP32 MANDIRI • FUSI DATA BMKG'}
         </p>
       </footer>
 

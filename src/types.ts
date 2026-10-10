@@ -9,15 +9,17 @@ export interface SensorReading {
   updated_at?: any;
   created_at?: any;
   water_level: number; // in cm (Tinggi Muka Air dari dasar sungai)
-  local_rain: number; // 0: None, 1: Light, 2: Medium, 3: Heavy
-  temperature: number; // in Celsius
-  humidity: number; // in %
+  soil_moisture?: number; // in % (Kelembapan Tanah Bantaran / Tanggul Sungai)
+  soil_status?: 'Kering' | 'Lembap' | 'Basah' | 'Jenuh Air' | string;
+  local_rain?: number; // 0: None, 1: Light, 2: Medium, 3: Heavy (legacy fallback)
+  temperature?: number; // in Celsius
+  humidity?: number; // in %
   node_id: string;
   distance?: number; // raw ultrasonic distance in cm (jarak sensor ke air)
-  source?: 'Hardware-ESP32' | 'Hardware-ESP32-Batch' | 'Simulator-Engine' | 'Manual-Peil-Schaal' | string;
-  samples_count?: number; // count of raw ultrasonic samples in batch (e.g. 360 samples)
-  batch_data?: Array<[string | number, number]> | Array<{ timestamp: number; distance: number; [key: string]: any }>; // Array 360 sampel
-  readings?: Array<{ timestamp: number; distance: number; [key: string]: any }> | Array<[string | number, number]>; // Array 360 sampel dari ESP32
+  source?: 'Hardware-ESP32' | 'Hardware-ESP32-SoilWake' | 'Hardware-ESP32-Batch' | 'Simulator-Engine' | 'Manual-Peil-Schaal' | string;
+  samples_count?: number; // count of raw ultrasonic samples in batch (e.g. 20 - 360 samples)
+  batch_data?: Array<[string | number, number]> | Array<{ timestamp: number; distance: number; [key: string]: any }>; // Array sampel
+  readings?: Array<{ timestamp: number; distance: number; [key: string]: any }> | Array<[string | number, number]>; // Array sampel dari ESP32
   notes?: string; // Catatan lapangan khusus (misal jika sensor error atau observasi visual)
   operator?: string; // Nama petugas penginput data manual
 }
