@@ -10,9 +10,12 @@ import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, addDoc, getDocs, query, orderBy, limit, setDoc, doc, onSnapshot, deleteDoc, where } from 'firebase/firestore';
+import { initializeFirestore, setLogLevel, collection, addDoc, getDocs, query, orderBy, limit, setDoc, doc, onSnapshot, deleteDoc, where } from 'firebase/firestore';
 
 dotenv.config();
+
+// Prevent internal gRPC stream reconnect notices from polluting logs
+setLogLevel('error');
 
 const PORT = 3000;
 const app = express();
@@ -28,9 +31,18 @@ if (fs.existsSync(configPath)) {
 }
 
 const firebaseApp = initializeApp(firebaseConfig);
-const db = firebaseConfig.firestoreDatabaseId
-  ? getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId)
-  : getFirestore(firebaseApp);
+const rawDbId = firebaseConfig.firestoreDatabaseId;
+const dbId = (rawDbId && rawDbId !== '(default)' && !rawDbId.includes('ai-studio-simbamonitoringt'))
+  ? rawDbId
+  : undefined;
+
+const db = initializeFirestore(
+  firebaseApp,
+  {
+    experimentalForceLongPolling: true,
+  },
+  dbId
+);
 
 // 2. Initialize Gemini API Client
 const ai = new GoogleGenAI({
