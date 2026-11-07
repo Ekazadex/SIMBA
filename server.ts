@@ -14,7 +14,11 @@ import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, addDoc, getDocs, query, orderBy, limit, setDoc, doc, onSnapshot, deleteDoc, where } from 'firebase/firestore';
 import { createCiliwungEngine } from './backend/ciliwung/simulation-engine.mjs';
 import { registerCiliwungRoutes } from './backend/ciliwung/ciliwung-api.mjs';
+import { createForecastWorker } from './backend/ciliwung/forecast-worker.mjs';
+import { sendForecastCupCarbon } from './backend/ciliwung/forecast-udp.mjs';
+import { createWeatherContextHandler } from './backend/ciliwung/weather-context.mjs';
 import { createCupCarbonTelemetryListener, CUPCARBON_TELEMETRY_PORT } from './backend/ciliwung/cupcarbon-telemetry.mjs';
+import { createHardwareLiveBus, registerHardwareLiveRoutes, createCiliwungModeController } from './backend/ciliwung/hardware-live.mjs';
 
 dotenv.config();
 
@@ -38,8 +42,37 @@ app.use((req, res, next) => {
 
 const cupCarbonSocket = createSocket('udp4');
 const ciliwungEngine = createCiliwungEngine({ intervalMs: 500 });
+const forecastWorker = createForecastWorker();
+const hardwareLiveBus = (createHardwareLiveBus as any)({
+  sendCupCarbon: (commands) => {
+    for (const command of commands) {
+      if (!Number.isInteger(command.controlPort)) continue;
+      const payload = Buffer.from(JSON.stringify(command));
+      cupCarbonSocket.send(payload, command.controlPort, '127.0.0.1');
+    }
+  },
+});
+registerHardwareLiveRoutes(app, { bus: hardwareLiveBus });
+const ciliwungModeController = (createCiliwungModeController as any)({
+  hardwareBus: hardwareLiveBus,
+  resetSimulation: async () => { ciliwungEngine.reset(); },
+});
+app.post('/api/ciliwung-mode', express.json(), async (request, response) => {
+  try {
+    const mode = await ciliwungModeController.switchTo(request.body?.mode);
+    return response.json({ success: true, mode });
+  } catch (error: any) {
+    return response.status(400).json({ success: false, error: error.message || 'Mode switch failed' });
+  }
+});
+app.get('/api/ciliwung-mode', (_request, response) => {
+  response.json({ mode: ciliwungModeController.mode });
+});
+app.get('/api/ciliwung-weather/context', createWeatherContextHandler());
 const ciliwungRoutes = registerCiliwungRoutes(app, {
   engine: ciliwungEngine,
+  worker: forecastWorker,
+  sendForecastCupCarbon: (command) => sendForecastCupCarbon(cupCarbonSocket, command),
   sendCupCarbon: (state) => {
     for (const node of state.cupNodes) {
       const command = Buffer.from(JSON.stringify({
@@ -76,7 +109,9 @@ cupCarbonTelemetry.listening
 
 process.on('exit', () => {
   ciliwungRoutes.unsubscribe();
+  forecastWorker.close();
   cupCarbonTelemetry.close();
+  hardwareLiveBus.close();
   try {
     cupCarbonSocket.close();
   } catch {
@@ -158,6 +193,24 @@ if (db) {
   }, (error) => {
     console.error('[Server] Error listening to config changes:', error);
   });
+}
+
+if (db) {
+  getDocs(query(collection(db, 'sensor_readings'), orderBy('timestamp', 'desc'), limit(1)))
+    .then((snapshot) => {
+      const latest = snapshot.docs[0]?.data();
+      const source = String(latest?.source || '').toLowerCase();
+      if (latest && source.includes('hardware') && Number.isFinite(Number(latest.water_level))) {
+        hardwareLiveBus.publishReading({
+          levelCm: Number(latest.water_level),
+          thresholdSiaga: currentConfig.threshold_siaga,
+          thresholdBahaya: currentConfig.threshold_bahaya,
+          measuredAt: new Date(Number(latest.timestamp) || Date.now()).toISOString(),
+        });
+        console.log('[Hardware Live] Seeded from the latest persisted ESP32 reading.');
+      }
+    })
+    .catch((error) => console.error('[Hardware Live] Could not seed latest reading:', error));
 }
 
 // Sound velocity correction based on temperature (Celsius)
@@ -493,11 +546,12 @@ app.get('/api/live-weather', async (req, res) => {
   let lastUpdated = new Date().toLocaleTimeString(isEn ? 'en-US' : 'id-ID', { hour: '2-digit', minute: '2-digit' }) + (isEn ? ' WIB' : ' WIB');
   let isFromBMKG = false;
 
-  // List of subdistrict adm4 codes for Depok Beji region requested by the user
+  // Verify location from BMKG's response; these adm4 codes resolve to Kukusan,
+  // Pondok Cina, and Beji Timur respectively (checked 2026-10-11).
   const bmkgUrls = [
+    'https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=32.76.06.1002', // Kukusan
     'https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=32.76.06.1005', // Pondok Cina
-    'https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=32.76.06.1006', // Kukusan
-    'https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=32.76.06.1002'  // Beji
+    'https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=32.76.06.1006'  // Beji Timur
   ];
 
   // Step 1: Try to fetch directly from BMKG API
@@ -984,6 +1038,13 @@ const handleHardwareTelemetry = async (req: express.Request, res: express.Respon
       source: 'Hardware-ESP32'
     });
 
+    hardwareLiveBus.publishReading({
+      levelCm: finalWaterLevel,
+      thresholdSiaga: currentConfig.threshold_siaga,
+      thresholdBahaya: currentConfig.threshold_bahaya,
+      measuredAt: new Date(now).toISOString(),
+    });
+
     console.log(`[Hardware Telemetry] Received from ${node_id}: Level=${finalWaterLevel}cm, Temp=${tempVal}°C, Status=${alertStatus}`);
 
     // If status is Siaga or Bahaya, log alert to system_logs
@@ -1113,9 +1174,16 @@ app.post('/api/telemetry/batch', express.json(), async (req, res) => {
       node_id: node_id,
       distance: finalDistance,
       samples_count: batchDataPairs.length,
-      batch_data: batchDataPairs, // Storing full 360 pairs array in this single document
+      batch_data: batchDataPairs, // Storing full 360 pairs array in this single Firestore document
       readings: rawArray, // Storing original raw readings array for ESP32 compatibility
       source: 'Hardware-ESP32-Batch'
+    });
+
+    hardwareLiveBus.publishReading({
+      levelCm: finalWaterLevel,
+      thresholdSiaga: currentConfig.threshold_siaga,
+      thresholdBahaya: currentConfig.threshold_bahaya,
+      measuredAt: new Date(now).toISOString(),
     });
 
     console.log(`[Batch Telemetry] Successfully processed 360 batch samples (${batchDataPairs.length} points) from ${node_id}. Representative Level: ${finalWaterLevel}cm (Status: ${alertStatus})`);

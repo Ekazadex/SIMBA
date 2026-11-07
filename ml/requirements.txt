@@ -1,0 +1,9 @@
+# Versions exercised on Windows native CPU, CPython 3.13.5.
+# Pin direct dependencies; TensorFlow transitives resolve through its metadata.
+numpy==2.4.2
+pandas==2.3.3
+scikit-learn==1.8.0
+tensorflow==2.21.0
+keras==3.15.1
+openpyxl==3.1.5
+pytest==9.1.1

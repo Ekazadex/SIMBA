@@ -34,7 +34,7 @@ test('registers the complete Ciliwung REST and SSE contract', () => {
   assert.ok(api.unsubscribe);
   for (const method of ['GET', 'POST']) {
     for (const path of method === 'GET'
-      ? ['/api/ciliwung-simulation/scenarios', '/api/ciliwung-simulation/state', '/api/ciliwung-simulation/stream']
+      ? ['/api/ciliwung-simulation/scenarios', '/api/ciliwung-simulation/state', '/api/ciliwung-simulation/history', '/api/ciliwung-simulation/scenario-previews', '/api/ciliwung-simulation/stream']
       : ['/api/ciliwung-simulation/start', '/api/ciliwung-simulation/stop', '/api/ciliwung-simulation/reset', '/api/ciliwung-simulation/speed']) {
       assert.equal(typeof app.routes.get(`${method} ${path}`), 'function');
     }
@@ -69,6 +69,64 @@ test('speed endpoint updates the authoritative simulation speed', async () => {
   await app.routes.get('POST /api/ciliwung-simulation/speed')({ body: { speedMultiplier: 50 } }, speedResponse);
   assert.equal(speedResponse.body.success, true);
   assert.equal(speedResponse.body.state.speedMultiplier, 50);
+});
+
+test('scenario-preview endpoint returns three causal synthetic histories and each node forecast', async () => {
+  const app = makeApp();
+  const engine = createCiliwungEngine({ autoStart: false });
+  const requests = [];
+  const worker = { async predict(request) {
+    requests.push(request);
+    const base = 100 + requests.length * 10;
+    return { runId: request.runId, nodeId: request.nodeId,
+      levelsCm: Array.from({ length: 12 }, (_, index) => base + index),
+      method: 'lstm_synthetic_v2', modelVersion: `synthetic_v2_${request.nodeId}` };
+  } };
+  registerCiliwungRoutes(app, { engine, worker, sendCupCarbon: () => {} });
+  const response = makeResponse();
+  await app.routes.get('GET /api/ciliwung-simulation/scenario-previews')({ query: { nodeId: 'N1' } }, response);
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body.previews.map((preview) => preview.scenarioId), ['ringan', 'sedang', 'lebat']);
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every((request) => request.nodeId === 'N1' && request.history.length === 96));
+  for (const request of requests) {
+    const stamps = request.history.map((row) => Date.parse(row.timestampUtc));
+    assert.ok(stamps.every((stamp, index) => index === 0 || stamp - stamps[index - 1] === 300_000));
+    assert.ok(request.history.every((row) => ['tmaCm', 'rainRateMmH', 'upstreamTmaCm', 'upstreamRainRateMmH']
+      .every((field) => Number.isFinite(row[field]) && row[field] >= 0)));
+  }
+  assert.equal(response.body.previews[0].rainfallDepthMmPerCatchment.UP1, 8);
+  assert.equal(response.body.previews[1].rainfallDepthMmPerCatchment.UP2, 15);
+  assert.equal(response.body.previews[2].rainfallDepthMmPerCatchment.N5, 18);
+  assert.equal(response.body.previews[0].predictedTmaCm['30'], 115);
+  assert.equal(response.body.previews[2].predictedTmaCm['60'], 141);
+});
+
+test('scenario-preview endpoint rejects an unmapped station', async () => {
+  const app = makeApp();
+  registerCiliwungRoutes(app, { engine: createCiliwungEngine({ autoStart: false }), worker: { predict: async () => null } });
+  const response = makeResponse();
+  await app.routes.get('GET /api/ciliwung-simulation/scenario-previews')({ query: { nodeId: 'fake-node' } }, response);
+  assert.equal(response.statusCode, 400);
+  assert.match(response.body.error, /unsupported.*nodeId/i);
+});
+
+test('history endpoint returns buffered legacy scenario samples for a completed run', async () => {
+  const app = makeApp();
+  const engine = createCiliwungEngine({ autoStart: false });
+  registerCiliwungRoutes(app, { engine, sendCupCarbon: () => {} });
+  const started = makeResponse();
+  await app.routes.get('POST /api/ciliwung-simulation/start')({ body: { scenario: 'sedang' } }, started);
+  engine.advance(1);
+  engine.advance(2);
+  engine.stop();
+
+  const response = makeResponse();
+  app.routes.get('GET /api/ciliwung-simulation/history')({}, response);
+  assert.equal(response.body.runId, started.body.state.runId);
+  assert.equal(response.body.episodeId, null);
+  assert.deepEqual(response.body.points.map((point) => point.time), [0, 1, 3]);
 });
 
 test('CupCarbon telemetry updates SSE state without echoing a control datagram', () => {

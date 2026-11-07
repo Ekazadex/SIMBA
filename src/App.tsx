@@ -295,6 +295,39 @@ export default function App() {
     }
   };
 
+  const switchCiliwungMode = async (mode: 'hardware' | 'simulation') => {
+    const response = await fetch('/api/ciliwung-mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.success === false) {
+      throw new Error(payload.error || `Gagal berpindah ke mode ${mode}.`);
+    }
+    return payload;
+  };
+
+  const handleEnterSimulation = async () => {
+    try {
+      await switchCiliwungMode('simulation');
+      setActiveTab('simulation');
+    } catch (error) {
+      console.error('Enter simulation mode failed:', error);
+      setAuthError(error instanceof Error ? error.message : 'Gagal masuk mode simulasi.');
+    }
+  };
+
+  const handleExitSimulation = async () => {
+    try {
+      await switchCiliwungMode('hardware');
+      setActiveTab('dashboard');
+    } catch (error) {
+      console.error('Return to hardware mode failed:', error);
+      setAuthError(error instanceof Error ? error.message : 'Gagal kembali ke mode hardware.');
+    }
+  };
+
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [inputUsername, setInputUsername] = useState('');
   const [inputPassword, setInputPassword] = useState('');
@@ -682,7 +715,7 @@ export default function App() {
             prefPushSiaga={prefPushSiaga}
             prefPushBahaya={prefPushBahaya}
             onNavigateTab={setActiveTab}
-            onEnterSimulation={() => setActiveTab('simulation')}
+            onEnterSimulation={handleEnterSimulation}
             onLatestReadingChange={handleLatestReadingChange}
             language={language}
             soundEnabled={soundEnabled}
@@ -707,7 +740,7 @@ export default function App() {
             onResetSimulation={handleResetSimulation}
           />
         ) : (
-          <CiliwungSimulationPage theme={theme} language={language} onExit={() => setActiveTab('dashboard')} />
+          <CiliwungSimulationPage theme={theme} language={language} onExit={handleExitSimulation} />
         )}
       </main>
 

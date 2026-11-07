@@ -1,0 +1,12 @@
+{
+  "dataset_version": "synthetic_v1",
+  "seed": 20261010,
+  "per_family": 16,
+  "raw_directory": "../../../../DATABMKG",
+  "dataset_dir": "../data/generated/synthetic_v1",
+  "models_dir": "../models",
+  "report_path": "../reports/synthetic_v1.json",
+  "max_epochs": 5,
+  "train_cap": 18,
+  "validation_cap": 12
+}

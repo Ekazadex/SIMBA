@@ -53,7 +53,16 @@ ehthumbs.db
 Thumbs.db
 Desktop.ini
 
-# 7. IDE & Workspace Settings
+# 7. Local orchestration, Python ML runtime, and generated demonstrations
+.unlazy/
+ml/.venv/
+ml/data/generated/
+ml/models/
+ml/.pytest_cache/
+**/__pycache__/
+*.pyc
+
+# 8. IDE & Workspace Settings
 .idea/
 .vscode/*
 !.vscode/extensions.json
@@ -64,7 +73,7 @@ Desktop.ini
 .classpath
 .settings/
 
-# 8. Temporary & Backup Files
+# 9. Temporary & Backup Files
 *.tmp
 *.temp
 *.bak

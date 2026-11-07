@@ -45,17 +45,18 @@ import {
   ShieldCheck,
   Zap
 } from 'lucide-react';
-import { 
-  ResponsiveContainer, 
-  AreaChart, 
-  Area, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  Legend, 
-  ReferenceLine 
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ReferenceLine
 } from 'recharts';
+import CiliwungHardwareLiveView from './CiliwungHardwareLiveView';
 
 /**
  * Extracts a numeric timestamp (milliseconds) from various Firestore field formats
@@ -1174,6 +1175,13 @@ export default function SCADADashboard({
         </div>
       </div>
 
+      <CiliwungHardwareLiveView
+        theme={theme}
+        latestReading={latestReading}
+        config={config ?? {}}
+        onEnterSimulation={onEnterSimulation}
+      />
+
       {/* DETAILED MEASUREMENT GAUGES & METRICS */}
       <div id="measurement-grid" className="col-span-12 lg:col-span-4 flex flex-col gap-6">
         
@@ -1794,8 +1802,12 @@ export default function SCADADashboard({
           </div>
         </div>
 
-        {/* Processed LSTM Prognostic Forecast Horizons */}
-        <div id="processed-forecast-panel" className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        {/* Legacy single-node advisory, separate from the synthetic replay forecast */}
+        <div id="processed-forecast-panel" className="flex flex-col gap-3">
+          <p className={`text-[11px] ${themeTextSub}`}>
+            Single-node advisory — legacy /api/predict uses Gemini or heuristic fallback; saved Firestore predictions may have different provenance. These values are not the synthetic N1/N5 LSTM replay forecast.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           
           <div className={`${themeCard} rounded-2xl p-5 flex flex-col justify-between`}>
             <div className={`flex justify-between items-center ${themeTextMuted} font-mono text-[9px] uppercase tracking-widest`}>
@@ -1808,7 +1820,7 @@ export default function SCADADashboard({
               </span>
             </div>
             <div className="text-[10px] font-mono text-[#3B82F6] bg-[#3B82F6]/5 border border-[#3B82F6]/15 rounded py-1 text-center">
-              CONF: {latestPrediction ? `${latestPrediction.confidence_score}%` : '--%'}
+              LEGACY ESTIMATE · NOT CALIBRATED
             </div>
           </div>
 
@@ -1823,7 +1835,7 @@ export default function SCADADashboard({
               </span>
             </div>
             <div className="text-[10px] font-mono text-[#3B82F6] bg-[#3B82F6]/5 border border-[#3B82F6]/15 rounded py-1 text-center">
-              CONF: {latestPrediction ? `${Math.round(latestPrediction.confidence_score * 0.95)}%` : '--%'}
+              LEGACY ESTIMATE · NOT CALIBRATED
             </div>
           </div>
 
@@ -1838,7 +1850,7 @@ export default function SCADADashboard({
               </span>
             </div>
             <div className="text-[10px] font-mono text-purple-400 bg-purple-950/15 border border-purple-800/20 rounded py-1 text-center">
-              CONF: {latestPrediction ? `${Math.round(latestPrediction.confidence_score * 0.88)}%` : '--%'}
+              LEGACY ESTIMATE · NOT CALIBRATED
             </div>
           </div>
 
@@ -1853,10 +1865,11 @@ export default function SCADADashboard({
               </span>
             </div>
             <div className="text-[10px] font-mono text-amber-400 bg-amber-950/15 border border-amber-800/20 rounded py-1 text-center">
-              CONF: {latestPrediction ? `${Math.round(latestPrediction.confidence_score * 0.78)}%` : '--%'}
+              LEGACY ESTIMATE · NOT CALIBRATED
             </div>
           </div>
 
+          </div>
         </div>
 
         {/* SENSOR FUSI LOKAL (Membentang Persegi Panjang Sejajar di Bawah 4 Horizon) */}

@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCiliwungEngine, NODE_REGISTRY, SCENARIO_PROFILES, SPEED_MULTIPLIERS } from '../backend/ciliwung/simulation-engine.mjs';
 
-test('registry contains the four upstream nodes and five 3D nodes', () => {
+test('registry exposes all nine semantic stations to the 3D backend without changing CupCarbon IDs', () => {
   assert.equal(NODE_REGISTRY.length, 9);
-  assert.deepEqual(NODE_REGISTRY.filter((node) => node.threeDNodeId).map((node) => node.id), ['N1', 'N2', 'N3', 'N4', 'N5']);
-  assert.deepEqual(NODE_REGISTRY.filter((node) => !node.threeDNodeId).map((node) => node.id), ['UP1', 'UP2', 'UP3', 'UP4']);
+  assert.deepEqual(NODE_REGISTRY.filter((node) => node.threeDNodeId).map((node) => node.id), ['UP1', 'UP2', 'UP3', 'UP4', 'N1', 'N2', 'N3', 'N4', 'N5']);
+  assert.deepEqual(NODE_REGISTRY.filter((node) => !node.threeDNodeId).map((node) => node.id), []);
+  assert.deepEqual(NODE_REGISTRY.map((node) => node.cupcarbonNodeId), [1, 2, 3, 4, 5, 20, 21, 22, 8]);
 });
 
 test('scenario profiles are deterministic and expose a configured completion target', () => {
@@ -25,7 +26,7 @@ test('start resets previous state and emits a complete initial snapshot', () => 
   assert.equal(first.scenario, 'ringan');
   assert.equal(first.simTimeSeconds, 0);
   assert.equal(first.cupNodes.length, 9);
-  assert.equal(first.threeDNodes.length, 5);
+  assert.equal(first.threeDNodes.length, 9);
   assert.match(first.runId, /^ciliwung-/);
 
   engine.start('sedang');
@@ -34,6 +35,23 @@ test('start resets previous state and emits a complete initial snapshot', () => 
   assert.equal(restarted.simTimeSeconds, 0);
   assert.notEqual(restarted.runId, first.runId);
   engine.stop();
+});
+
+test('legacy scenario chart history retains the latest run snapshots until reset', () => {
+  const engine = createCiliwungEngine({ intervalMs: 10, autoStart: false });
+  const first = engine.start('sedang');
+  engine.advance(1);
+  engine.advance(2);
+  engine.stop();
+
+  const history = engine.getChartHistory();
+  assert.equal(history.runId, first.runId);
+  assert.equal(history.episodeId, null);
+  assert.deepEqual(history.points.map((point) => point.time), [0, 1, 3]);
+  assert.ok(history.points.every((point) => Object.keys(point.rainRatesMmH).length === 0));
+
+  engine.reset();
+  assert.deepEqual(engine.getChartHistory(), { runId: null, episodeId: null, points: [] });
 });
 
 test('advance applies local rise and delayed downstream propagation', () => {
