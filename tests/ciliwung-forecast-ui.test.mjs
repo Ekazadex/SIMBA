@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { createCiliwungEngine } from '../backend/ciliwung/simulation-engine.mjs';
 
 const simulationPath = new URL('../src/components/CiliwungSimulationPage.tsx', import.meta.url);
 const scadaPath = new URL('../src/components/SCADADashboard.tsx', import.meta.url);
@@ -22,6 +23,8 @@ const bundle = await build({
     setup(plugin) {
       plugin.onResolve({ filter: /^\.\/CiliwungHardwareLiveView$/ }, () => ({ path: 'map', namespace: 'test-map' }));
       plugin.onLoad({ filter: /.*/, namespace: 'test-map' }, () => ({ contents: 'export const Map2D = () => null', loader: 'js' }));
+      plugin.onResolve({ filter: /^recharts$/ }, () => ({ path: 'chart', namespace: 'test-chart' }));
+      plugin.onLoad({ filter: /.*/, namespace: 'test-chart' }, () => ({ contents: "export const Curve = 'curve'", loader: 'js' }));
       plugin.onResolve({ filter: /^react$/ }, () => ({ path: 'react', namespace: 'test-hooks' }));
       plugin.onLoad({ filter: /.*/, namespace: 'test-hooks' }, () => ({
         contents: `
@@ -40,7 +43,7 @@ const module = { exports: {} };
 new Function('module', 'exports', bundle.outputFiles[0].text)(module, module.exports);
 const SimulationPage = module.exports.default;
 
-function mount({ episodes = [], latest = { status: 'unavailable', reason: 'insufficient_history' }, weather = { status: 'unavailable', reason: 'not_loaded' }, history = { runId: null, points: [] }, scenarioPreviews = null } = {}) {
+function mount({ language = 'en', episodes = [], latest = { status: 'unavailable', reason: 'insufficient_history' }, weather = { status: 'unavailable', reason: 'not_loaded' }, history = { runId: null, points: [] }, scenarioPreviews = null, projection = null } = {}) {
   const saved = { window: globalThis.window, fetch: globalThis.fetch, EventSource: globalThis.EventSource, hooks: globalThis.__simbaUiHooks };
   const calls = [];
   const streams = [];
@@ -52,7 +55,7 @@ function mount({ episodes = [], latest = { status: 'unavailable', reason: 'insuf
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), method: options.method ?? 'GET', body: options.body ? JSON.parse(options.body) : null });
     const routeUrl = String(url);
-    const payload = routeUrl.includes('/episodes') ? episodes : routeUrl.includes('/api/ciliwung-simulation/history') ? history : routeUrl.includes('/scenario-previews') ? scenarioPreviews : routeUrl.includes('/api/ciliwung-weather/context') ? weather : routeUrl.includes('/latest') ? latest : { success: true };
+    const payload = routeUrl.includes('/episodes') ? episodes : routeUrl.includes('/api/ciliwung-simulation/history') ? history : routeUrl.includes('/scenario-previews') ? scenarioPreviews : routeUrl.includes('/api/ciliwung-simulation/projection') ? projection : routeUrl.includes('/api/ciliwung-weather/context') ? weather : routeUrl.includes('/latest') ? latest : { success: true };
     return { ok: true, json: async () => payload };
   };
   globalThis.EventSource = class {
@@ -80,7 +83,7 @@ function mount({ episodes = [], latest = { status: 'unavailable', reason: 'insuf
   };
   function render() {
     slot = 0;
-    tree = SimulationPage({ theme: 'dark', language: 'en', onExit() {} });
+    tree = SimulationPage({ theme: 'dark', language, onExit() {} });
     effects.splice(0).forEach((run) => run());
     return tree;
   }
@@ -109,8 +112,9 @@ function byText(tree, tag, label) {
 const tick = async () => { await Promise.resolve(); await Promise.resolve(); };
 
 function snapshot({ runId = 'run-1', mode = 'rain_replay', episodeId = 'storm-2', status = 'running', simTimeSeconds = 300, timestampUtc = '2026-08-01T05:15:00Z', rain = 24, tma = 170 } = {}) {
-  const cupNodes = ['UP1', 'UP2', 'UP3', 'UP4', 'N1', 'N2', 'N3', 'N4', 'N5'].map((id) => ({
-    id, name: id, cupcarbonNodeId: 1, threeDNodeId: id.startsWith('N') ? id : null,
+  const names = { UP1: 'Puncak', UP2: 'Katulampa', UP3: 'Sukaraja', UP4: 'Cibinong', N1: 'Pos Depok', N2: 'Ciliwung Stage 1', N3: 'Ciliwung Stage 2', N4: 'Ciliwung Stage 3', N5: 'Pintu Air Manggarai' };
+  const cupNodes = Object.keys(names).map((id) => ({
+    id, name: names[id], cupcarbonNodeId: 1, threeDNodeId: id.startsWith('N') ? id : null,
     tmaCm: tma, stageRiseM: 0.1, status: 'AMAN', rainRateMmH: rain, rainMm5m: rain / 12, rainSource: 'synthetic',
   }));
   return { runId, mode, episodeId, scenario: null, status, speedMultiplier: 1, simTimeSeconds, timestampUtc,
@@ -127,24 +131,138 @@ const sampleForecast = {
   quality: 'experimental_synthetic_only', status: 'available',
 };
 
-test('BMKG live forecast context is shown with location and issue time but never as measured replay rainfall', async () => {
-  const ui = mount({ weather: {
-    source: 'BMKG', kind: 'forecast_context', status: 'available',
-    location: { desa: 'Kukusan', kecamatan: 'Beji' },
-    issuedAt: '2026-08-01T00:00:00Z', validFrom: '2026-08-01T03:00:00Z',
-    validTo: '2026-08-01T06:00:00Z', weatherDesc: 'Hujan Ringan',
-    acquiredAt: '2026-08-01T02:00:00Z',
-  } });
+test('simulation overview displays live simulation levels for all nodes without the weather card', async () => {
+  const ui = mount();
   try {
     ui.render();
-    await tick();
+    ui.streams[0].emit('state', snapshot({ tma: 170 }));
     const tree = ui.render();
-    const card = descendants(tree, (node) => node.props?.['data-testid'] === 'bmkg-weather-context')[0];
-    assert.ok(card);
-    assert.match(text(card), /BMKG.*Kukusan.*Hujan Ringan/s);
-    assert.match(text(card), /issued.*07:00.*valid.*10:00/i);
-    assert.match(text(card), /not.*observed.*5-minute.*not.*LSTM input/i);
-    assert.equal(ui.calls.filter((call) => call.url.includes('/api/ciliwung-weather/context')).length, 1);
+    const panel = descendants(tree, node => node.props?.['data-testid'] === 'simulation-node-levels')[0];
+    assert.ok(panel);
+    for (const name of ['Puncak', 'Katulampa', 'Sukaraja', 'Cibinong', 'Pos Depok', 'Ciliwung Stage 1', 'Ciliwung Stage 2', 'Ciliwung Stage 3', 'Pintu Air Manggarai']) assert.ok(text(panel).includes(name));
+    assert.doesNotMatch(text(panel), /\b(?:UP[1-4]|N[1-5])\b/);
+    assert.match(text(panel), /170\.0 cm/);
+    assert.match(text(panel), /not sensor readings/);
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'bmkg-weather-context').length, 0);
+    assert.equal(ui.calls.filter(call => call.url.includes('/api/ciliwung-weather/context')).length, 0);
+  } finally { ui.restore(); }
+});
+
+test('150x can be selected and sent when starting heavy rain', async () => {
+  const ui = mount();
+  try {
+    let tree = ui.render();
+    const select = descendants(tree, node => node.type === 'select' && node.props?.['aria-label'] === 'Simulation speed')[0];
+    assert.ok(descendants(select, node => node.type === 'option' && node.props.value === 150)[0]);
+    await select.props.onChange({ target: { value: '150' } });
+    tree = ui.render();
+    byText(tree, 'button', 'Hujan Lebat').props.onClick();
+    tree = ui.render();
+    await byText(tree, 'button', 'Start Simulation').props.onClick();
+    assert.deepEqual(ui.calls.find(call => call.url.endsWith('/api/ciliwung-simulation/start'))?.body,
+      { scenario: 'lebat', speedMultiplier: 150 });
+  } finally { ui.restore(); }
+});
+
+test('graph uses the selected node scenario maximum as its scale and expands for higher forecast values', async () => {
+  const ui = mount();
+  try {
+    ui.render();
+    await new Promise(resolve => setImmediate(resolve));
+    const state = snapshot({ tma: 80 });
+    ui.streams[0].emit('state', state);
+    byText(ui.render(), 'button', 'Forecast Graph').props.onClick();
+    let tree = ui.render();
+    let point = descendants(tree, node => node.props?.['data-testid'] === 'current-tma-point')[0];
+    assert.equal(point.props.cy, 190 - 80 / 220 * 180);
+    descendants(tree, node => node.props?.['data-testid'] === 'simulation-node-N2')[0].props.onClick();
+    tree = ui.render();
+    point = descendants(tree, node => node.props?.['data-testid'] === 'current-tma-point')[0];
+    assert.equal(point.props.cy, 190 - 80 / 260 * 180);
+    ui.streams[0].emit('forecast', { ...sampleForecast, nodeId: 'N2', trajectoryCm: [250, 280, 310, 340, 370, 400, 410, 420, 430, 440, 450, 460] });
+    tree = ui.render();
+    point = descendants(tree, node => node.props?.['data-testid'] === 'current-tma-point')[0];
+    assert.equal(point.props.cy, 190 - 80 / 440 * 180);
+    const prediction = descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace')[0];
+    assert.ok(prediction.props.points.every(({ y }) => y >= 10 && y <= 190));
+  } finally { ui.restore(); }
+});
+
+
+test('viewer switches from default 2D to 3D and graph while current node levels remain independent', () => {
+  const ui = mount({ language: 'id' });
+  try {
+    let tree = ui.render();
+    const pressed = (label) => byText(tree, 'button', label).props['aria-pressed'];
+    assert.equal(pressed('Peta 2D'), true);
+    assert.equal(descendants(tree, node => node.type === 'iframe').length, 0);
+    ui.streams[0].emit('state', snapshot({ tma: 170 }));
+    tree = ui.render();
+    byText(tree, 'button', 'Peta 3D').props.onClick();
+    tree = ui.render();
+    assert.equal(pressed('Peta 3D'), true);
+    assert.equal(descendants(tree, node => node.type === 'iframe').length, 1);
+    assert.match(text(descendants(tree, node => node.props?.['data-testid'] === 'simulation-node-levels')[0]), /170\.0 cm/);
+    ui.streams[0].emit('forecast', sampleForecast);
+    byText(tree, 'button', 'Grafik Prediksi').props.onClick();
+    tree = ui.render();
+    assert.equal(pressed('Grafik Prediksi'), true);
+    assert.equal(descendants(tree, node => node.type === 'iframe').length, 0);
+    assert.match(text(tree), /belum tervalidasi untuk peringatan banjir operasional/i);
+    assert.match(text(descendants(tree, node => node.props?.['data-testid'] === 'simulation-node-levels')[0]), /170\.0 cm/);
+    ui.streams[0].emit('state', snapshot({ tma: 180 }));
+    tree = ui.render();
+    assert.match(text(descendants(tree, node => node.props?.['data-testid'] === 'simulation-node-levels')[0]), /180\.0 cm/);
+    byText(tree, 'button', 'Peta 2D').props.onClick();
+    assert.equal(byText(ui.render(), 'button', 'Peta 2D').props['aria-pressed'], true);
+  } finally { ui.restore(); }
+});
+
+test('graph reports waiting, backend unavailability and stopped replay without inventing predictions', () => {
+  const ui = mount();
+  try {
+    ui.render();
+    ui.streams[0].emit('state', snapshot());
+    byText(ui.render(), 'button', 'Forecast Graph').props.onClick();
+    let tree = ui.render();
+    assert.match(text(tree), /Waiting for the current forecast/);
+    ui.streams[0].emit('forecast', { runId: 'run-1', nodeId: 'N1', issuedAt: sampleForecast.issuedAt, status: 'unavailable', reason: 'insufficient_history' });
+    tree = ui.render();
+    assert.match(text(tree), /Forecast unavailable: insufficient_history/);
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace').length, 0);
+    ui.streams[0].emit('forecast', sampleForecast);
+    tree = ui.render();
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace').length, 1);
+    ui.streams[0].emit('state', snapshot({ status: 'stopped' }));
+    tree = ui.render();
+    assert.match(text(tree), /Replay is not running/i);
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace').length, 0);
+  } finally { ui.restore(); }
+});
+
+test('node cards select and highlight the graph node only in graph view', () => {
+  const ui = mount();
+  try {
+    let tree = ui.render();
+    ui.streams[0].emit('state', snapshot());
+    tree = ui.render();
+    const node = (id) => descendants(tree, item => item.props?.['data-testid'] === `simulation-node-${id}`)[0];
+    assert.equal(node('N1').props.disabled, true);
+    assert.equal(node('N1').props['aria-pressed'], undefined);
+    byText(tree, 'button', 'Forecast Graph').props.onClick();
+    tree = ui.render();
+    assert.equal(node('N1').props['aria-pressed'], true);
+    assert.equal(node('N2').props['aria-pressed'], false);
+    node('N2').props.onClick();
+    tree = ui.render();
+    assert.equal(node('N1').props['aria-pressed'], false);
+    assert.equal(node('N2').props['aria-pressed'], true);
+    assert.match(text(descendants(tree, item => item.props?.['data-testid'] === 'forecast-graph')[0]), /Ciliwung Stage 1/);
+    assert.match(text(node('N2')), /170\.0 cm/);
+    byText(tree, 'button', '2D Map').props.onClick();
+    tree = ui.render();
+    assert.equal(node('N2').props['aria-pressed'], undefined);
+    assert.equal(node('N2').props.disabled, true);
   } finally { ui.restore(); }
 });
 
@@ -168,242 +286,256 @@ test('episode selector starts the selected synthetic replay without replacing le
   } finally { ui.restore(); }
 });
 
-test('matching forecast SSE shows distinct 30/60 simulation-time predictions with provenance; a new run hides old predictions', async () => {
+test('forecast graph hides a prediction when the simulation run or issue time changes', () => {
   const ui = mount();
   try {
     ui.render();
     ui.streams[0].emit('state', snapshot());
     ui.streams[0].emit('forecast', sampleForecast);
+    byText(ui.render(), 'button', 'Forecast Graph').props.onClick();
+    const trace = () => descendants(ui.render(), node => node.props?.['data-testid'] === 'forecast-tma-trace');
+    assert.equal(trace().length, 1);
+    ui.streams[0].emit('state', snapshot({ simTimeSeconds: 600, timestampUtc: '2026-08-01T05:20:00Z' }));
+    assert.equal(trace().length, 0);
+    ui.streams[0].emit('state', snapshot({ runId: 'run-2' }));
+    assert.equal(trace().length, 0);
+  } finally { ui.restore(); }
+});
+
+test('legacy graph follows current simulation and does not attach an unrelated preview', async () => {
+  const ui = mount({ scenarioPreviews: { nodeId: 'N1', previews: [{ scenarioId: 'sedang', currentSyntheticTmaCm: 98, trajectoryCm: Array(12).fill(107) }] } });
+  try {
+    ui.render();
+    const idle = snapshot({ runId: null, mode: 'legacy', episodeId: null, status: 'idle', simTimeSeconds: 0 });
+    ui.streams[0].emit('state', idle);
+    byText(ui.render(), 'button', 'Forecast Graph').props.onClick();
     let tree = ui.render();
-    const panel = descendants(tree, (node) => node.props?.['data-testid'] === 'ciliwung-forecast')[0];
-    assert.ok(panel, 'a separate forecast panel exists');
-    assert.match(text(panel), /SYNTHETIC DEMO/);
-    assert.match(text(panel), /N1/);
-    assert.match(text(panel), /lstm_synthetic_v1.*v1/i);
-    assert.match(text(panel), /12:15.*WIB/);
-    assert.match(text(panel), /experimental.*not validated/i);
-    const halfHour = descendants(panel, (node) => node.props?.['data-testid'] === 'forecast-30')[0];
-    const hour = descendants(panel, (node) => node.props?.['data-testid'] === 'forecast-60')[0];
-    assert.match(text(halfHour), /205\.0 cm.*12:45.*not indicated/i);
-    assert.match(text(hour), /265\.0 cm.*13:15.*within 60 min/i);
-    ui.streams[0].emit('state', snapshot({ runId: 'run-2', episodeId: 'storm-3' }));
+    assert.match(text(tree), /Start the simulation to see the graph/);
+    assert.equal(descendants(tree, node => node.type === 'polyline').length, 0);
+    const running = { ...snapshot({ runId: 'legacy', mode: 'legacy', episodeId: null, simTimeSeconds: 10, tma: 70 }), scenario: 'sedang' };
+    ui.streams[0].emit('state', running);
+    ui.render();
+    ui.streams[0].emit('state', { ...running, simTimeSeconds: 20, cupNodes: running.cupNodes.map(node => ({ ...node, tmaCm: 72.3 })) });
     tree = ui.render();
-    assert.doesNotMatch(text(descendants(tree, (node) => node.props?.['data-testid'] === 'ciliwung-forecast')[0]), /265\.0 cm/);
+    const current = descendants(tree, node => node.props?.['data-testid'] === 'current-tma-point')[0];
+    const line = descendants(tree, node => node.props?.['data-testid'] === 'current-tma-trace')[0];
+    const panel = descendants(tree, node => node.props?.['data-testid'] === 'simulation-node-levels')[0];
+    assert.match(text(panel), /72\.3 cm/);
+    assert.equal(current.props.cy, 190 - 72.3 / 220 * 180);
+    assert.deepEqual(line.props.points.at(-1), { x: 360, y: current.props.cy });
+    assert.match(text(tree), /Calculating scenario projection/);
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'scenario-preview-trace').length, 0);
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace').length, 0);
+    assert.equal(ui.calls.some(call => call.url.includes('/scenario-previews')), false);
+    ui.streams[0].emit('state', { ...running, status: 'stopped', simTimeSeconds: 20 });
+    tree = ui.render();
+    assert.ok(descendants(tree, node => node.props?.['data-testid'] === 'current-tma-point')[0]);
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace').length, 0);
   } finally { ui.restore(); }
 });
 
-test('a later five-minute state bin hides an earlier forecast from the same run', () => {
-  const ui = mount();
+test('legacy projection follows the actual run, joins the current point, and retires on stop', async () => {
+  const engine = createCiliwungEngine({ autoStart: false });
+  engine.start('sedang');
+  for (let i = 0; i < 80; i++) engine.advance(0.5);
+  const first = engine.getState();
+  const projection = engine.getLegacyProjection('N1');
+  const ui = mount({ projection });
   try {
     ui.render();
-    ui.streams[0].emit('state', snapshot());
-    ui.streams[0].emit('forecast', sampleForecast);
-    let panel = descendants(ui.render(), (node) => node.props?.['data-testid'] === 'ciliwung-forecast')[0];
-    assert.match(text(panel), /205\.0 cm/);
-    ui.streams[0].emit('state', snapshot({ simTimeSeconds: 600, timestampUtc: '2026-08-01T05:20:00Z', tma: 174 }));
-    panel = descendants(ui.render(), (node) => node.props?.['data-testid'] === 'ciliwung-forecast')[0];
-    assert.doesNotMatch(text(panel), /205\.0 cm/);
-    assert.match(text(panel), /Forecast unavailable/);
-    ui.streams[0].emit('forecast', { ...sampleForecast, issuedAt: '2026-08-01T05:20:00Z', predictedTmaCm: { '30': 207, '60': 269 } });
-    panel = descendants(ui.render(), (node) => node.props?.['data-testid'] === 'ciliwung-forecast')[0];
-    assert.match(text(panel), /207\.0 cm/);
-  } finally { ui.restore(); }
+    ui.streams[0].emit('state', first);
+    byText(ui.render(), 'button', 'Forecast Graph').props.onClick();
+    ui.render();
+    await new Promise(resolve => setImmediate(resolve));
+    let tree = ui.render();
+    let current = descendants(tree, node => node.props?.['data-testid'] === 'current-tma-point')[0];
+    let forecast = descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace')[0];
+    assert.ok(forecast);
+    assert.deepEqual(forecast.props.points[0], { x: 360, y: current.props.cy });
+    assert.match(text(tree), /Projection from the current simulation, not an LSTM forecast/);
+    assert.doesNotMatch(text(tree), /Scenario ends at/);
+    assert.match(text(tree), /Estimate \+30 min/);
+    const count = ui.calls.filter(call => call.url.includes('/api/ciliwung-simulation/projection')).length;
+    const next = engine.advance(0.5);
+    ui.streams[0].emit('state', next);
+    tree = ui.render();
+    current = descendants(tree, node => node.props?.['data-testid'] === 'current-tma-point')[0];
+    forecast = descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace')[0];
+    assert.ok(forecast, 'matching later state reuses the projection');
+    assert.deepEqual(forecast.props.points[0], { x: 360, y: current.props.cy });
+    const next30 = projection.points.find(point => point.afterSeconds === 1800.5);
+    assert.ok(next30);
+    assert.match(text(tree), new RegExp(`Estimate \\+30 min · ${next30.tmaCm.toFixed(1)} cm`));
+    assert.equal(forecast.props.points.at(-1).x, 712);
+    assert.equal(ui.calls.filter(call => call.url.includes('/api/ciliwung-simulation/projection')).length, count);
+    ui.streams[0].emit('state', engine.stop());
+    tree = ui.render();
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace').length, 0);
+  } finally { ui.restore(); engine.stop(); }
 });
 
-test('replay page hydrates 96 causal historical bins so rain and level trends are visible immediately', async () => {
-  const points = Array.from({ length: 96 }, (_, i) => ({
-    runId: 'run-1', time: i * 300, timestampUtc: new Date(Date.parse('2026-08-01T00:00:00Z') + i * 300_000).toISOString(),
-    values: { N1: 60 + i / 10 }, rainRatesMmH: { N1: i >= 90 ? 24 : 0 },
-  }));
-  const ui = mount({ history: { runId: 'run-1', episodeId: 'storm-2', points } });
+test('a slow projection response stays usable when the simulation advances during the request', async () => {
+  const engine = createCiliwungEngine({ autoStart: false });
+  engine.start('sedang');
+  const first = engine.getState();
+  const prediction = engine.getLegacyProjection('N1');
+  let resolveProjection;
+  const projection = new Promise(resolve => { resolveProjection = resolve; });
+  const ui = mount({ projection });
   try {
     ui.render();
-    ui.streams[0].emit('state', snapshot({ simTimeSeconds: 95 * 300 }));
+    ui.streams[0].emit('state', first);
+    byText(ui.render(), 'button', 'Forecast Graph').props.onClick();
     ui.render();
-    await new Promise((resolve) => setImmediate(resolve));
-    const graphButton = byText(ui.render(), 'button', 'View Graph');
-    graphButton.props.onClick();
+    ui.streams[0].emit('state', engine.advance(0.5));
+    ui.render();
+    assert.equal(ui.calls.filter(call => call.url.includes('/api/ciliwung-simulation/projection')).length, 1);
+    resolveProjection(prediction);
+    await new Promise(resolve => setImmediate(resolve));
     const tree = ui.render();
-    assert.match(text(tree), /96 past five-minute bins from backend replay.*not Firestore/i);
-    const graph = descendants(tree, (node) => node.type === 'svg' && node.props?.['aria-label'] === 'Grafik TMA N1')[0];
-    const current = descendants(graph, (node) => node.props?.['data-testid'] === 'current-tma-trace')[0];
-    const rain = descendants(graph, (node) => node.props?.['data-testid'] === 'synthetic-rain-trace')[0];
-    assert.ok(current?.props.points.split(' ').length >= 96);
-    assert.ok(rain?.props.points.split(' ').length >= 96);
-    assert.equal(ui.calls.filter((call) => call.url.endsWith('/api/ciliwung-simulation/history')).length, 1);
-  } finally { ui.restore(); }
+    const current = descendants(tree, node => node.props?.['data-testid'] === 'current-tma-point')[0];
+    const forecast = descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace')[0];
+    assert.ok(forecast);
+    assert.deepEqual(forecast.props.points[0], { x: 360, y: current.props.cy });
+  } finally { ui.restore(); engine.stop(); }
 });
 
-test('legacy scenario graph hydrates buffered state history instead of promising replay-only rain bins', async () => {
-  const points = [0, 1, 2].map((time) => ({
-    runId: 'legacy-run', time, values: { N1: 202 + time }, rainRatesMmH: {},
-  }));
-  const ui = mount({ history: { runId: 'legacy-run', episodeId: null, points } });
+test('legacy projection stops at scenario completion rather than fabricating a 30-minute estimate', async () => {
+  const engine = createCiliwungEngine({ autoStart: false });
+  engine.start('lebat', 50);
+  while (engine.getState().status === 'running' && engine.getState().simTimeSeconds < 8300) engine.advance(0.5);
+  const current = engine.getState();
+  const projection = engine.getLegacyProjection('N1');
+  assert.equal(projection.scenarioCompletes, true);
+  const ui = mount({ projection });
   try {
     ui.render();
-    const legacyState = { ...snapshot({ runId: 'legacy-run', mode: 'legacy', episodeId: null, status: 'completed', simTimeSeconds: 2 }), scenario: 'sedang' };
-    legacyState.cupNodes.forEach((node) => { delete node.rainRateMmH; delete node.rainMm5m; });
-    ui.streams[0].emit('state', legacyState);
+    ui.streams[0].emit('state', current);
+    byText(ui.render(), 'button', 'Forecast Graph').props.onClick();
     ui.render();
-    await new Promise((resolve) => setImmediate(resolve));
-    byText(ui.render(), 'button', 'View Graph').props.onClick();
+    await new Promise(resolve => setImmediate(resolve));
     const tree = ui.render();
-    const graph = descendants(tree, (node) => node.type === 'svg' && node.props?.['aria-label'] === 'Grafik TMA N1')[0];
-    const current = descendants(graph, (node) => node.props?.['data-testid'] === 'current-tma-trace')[0];
-    assert.ok(current?.props.points.split(' ').length >= 3);
-    assert.match(text(tree), /buffered legacy state samples/i);
-    assert.doesNotMatch(text(tree), /Initial 96 past five-minute bins from backend replay/i);
-    assert.equal(descendants(graph, (node) => node.props?.['data-testid'] === 'synthetic-rain-trace').length, 0);
-    assert.equal(ui.calls.filter((call) => call.url.endsWith('/api/ciliwung-simulation/history')).length, 1);
-  } finally { ui.restore(); }
+    assert.ok(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace')[0]);
+    assert.match(text(tree), /Scenario ends at/);
+    assert.doesNotMatch(text(tree), /Estimate \+30 min/);
+  } finally { ui.restore(); engine.stop(); }
 });
 
-test('legacy graph overlays three separate synthetic-v2 model scenario previews for the selected node', async () => {
-  const previews = [
-    { scenarioId: 'ringan', label: 'Hujan Ringan', currentSyntheticTmaCm: 73.56, rainfallDepthMmPerCatchment: { UP1: 8, N5: 7 }, predictedTmaCm: { '30': 86.57, '60': 101.9 }, trajectoryCm: [76.45, 79.32, 85.25, 82.65, 86.34, 86.57, 95.44, 97.5, 95.58, 94.31, 97.16, 101.9], method: 'lstm_synthetic_v2', modelVersion: 'synthetic_v2_N1' },
-    { scenarioId: 'sedang', label: 'Hujan Sedang', currentSyntheticTmaCm: 152.6, rainfallDepthMmPerCatchment: { UP1: 20, UP2: 15, N1: 8, N5: 10 }, predictedTmaCm: { '30': 205.8, '60': 252.1 }, trajectoryCm: [169.9, 177.6, 187.7, 178.1, 201.8, 205.8, 218.7, 241.9, 251.2, 255.6, 256.8, 252.1], method: 'lstm_synthetic_v2', modelVersion: 'synthetic_v2_N1' },
-    { scenarioId: 'lebat', label: 'Hujan Lebat', currentSyntheticTmaCm: 248.7, rainfallDepthMmPerCatchment: { UP2: 35, UP4: 20, N1: 12, N5: 18 }, predictedTmaCm: { '30': 338.8, '60': 421.9 }, trajectoryCm: [260.2, 295.9, 287.2, 298.8, 322.3, 338.8, 339.5, 379.6, 394.6, 418.2, 419.8, 421.9], method: 'lstm_synthetic_v2', modelVersion: 'synthetic_v2_N1' },
+test('legacy projection is hidden if the run, speed, node, or current value no longer match', async () => {
+  const engine = createCiliwungEngine({ autoStart: false });
+  engine.start('sedang');
+  const initial = engine.getState();
+  const projection = engine.getLegacyProjection('N1');
+  const ui = mount({ projection });
+  try {
+    ui.render();
+    ui.streams[0].emit('state', initial);
+    byText(ui.render(), 'button', 'Forecast Graph').props.onClick();
+    ui.render();
+    await new Promise(resolve => setImmediate(resolve));
+    let tree = ui.render();
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace').length, 1);
+    const changed = { ...initial, cupNodes: initial.cupNodes.map(node => node.id === 'N1' ? { ...node, tmaCm: node.tmaCm + 5 } : node) };
+    ui.streams[0].emit('state', changed);
+    tree = ui.render();
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace').length, 0);
+    ui.streams[0].emit('state', { ...initial, speedMultiplier: 10 });
+    tree = ui.render();
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace').length, 0);
+    ui.streams[0].emit('state', { ...initial, runId: 'different-run' });
+    tree = ui.render();
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace').length, 0);
+  } finally { ui.restore(); engine.stop(); }
+});
+
+test('reconnecting loads matching backend history without overwriting newer live state', async () => {
+  const points = [
+    { runId: 'run-1', time: 0, values: { N1: 100 } },
+    { runId: 'run-1', time: 300, values: { N1: 120 } },
+    { runId: 'other-run', time: 100, values: { N1: 999 } },
   ];
-  const points = [0, 1, 2].map((time) => ({ runId: 'legacy-run', time, values: { N1: 200 + time }, rainRatesMmH: {} }));
-  const ui = mount({
-    history: { runId: 'legacy-run', episodeId: null, points },
-    scenarioPreviews: { nodeId: 'N1', datasetVersion: 'synthetic_v2', quality: 'experimental_synthetic_only', previews },
-  });
+  const ui = mount({ history: { runId: 'run-1', points } });
   try {
     ui.render();
-    await tick();
-    let tree = ui.render();
-    byText(tree, 'button', 'Hujan Sedang').props.onClick();
-    const legacyState = { ...snapshot({ runId: 'legacy-run', mode: 'legacy', episodeId: null, status: 'completed', simTimeSeconds: 2 }), scenario: 'sedang' };
-    legacyState.cupNodes.forEach((node) => { delete node.rainRateMmH; delete node.rainMm5m; });
-    ui.streams[0].emit('state', legacyState);
+    ui.streams[0].emit('state', snapshot({ simTimeSeconds: 300, tma: 170 }));
+    byText(ui.render(), 'button', 'Forecast Graph').props.onClick();
     ui.render();
-    await new Promise((resolve) => setImmediate(resolve));
-    tree = ui.render();
-    byText(tree, 'button', 'View Graph').props.onClick();
-    tree = ui.render();
-
-    const chart = descendants(tree, (node) => node.type === 'svg' && node.props?.['aria-label'] === 'Grafik TMA N1')[0];
-    const current = descendants(chart, (node) => node.props?.['data-testid'] === 'current-tma-trace')[0];
-    const previewTraces = descendants(chart, (node) => node.props?.['data-testid'] === 'scenario-preview-trace');
-    assert.ok(current?.props.points.split(' ').length >= 3);
-    assert.equal(previewTraces.length, 3);
-    assert.deepEqual(previewTraces.map((node) => node.props['data-scenario']), ['ringan', 'sedang', 'lebat']);
-    assert.equal(previewTraces.find((node) => node.props['data-scenario'] === 'sedang').props.strokeWidth, 3);
-    const panel = descendants(tree, (node) => node.props?.['data-testid'] === 'scenario-lstm-estimates')[0];
-    assert.ok(panel);
-    assert.match(text(panel), /LSTM scenario estimates.*N1/s);
-    assert.match(text(panel), /Hujan Ringan.*86\.57 cm.*101\.90 cm/s);
-    assert.match(text(panel), /Hujan Sedang.*205\.80 cm.*252\.10 cm/s);
-    assert.match(text(panel), /Hujan Lebat.*338\.80 cm.*421\.90 cm/s);
-    assert.match(text(panel), /separate from current legacy run/i);
-    assert.equal(ui.calls.filter((call) => call.url.endsWith('/api/ciliwung-simulation/scenario-previews?nodeId=N1')).length, 1);
+    await new Promise(resolve => setImmediate(resolve));
+    const tree = ui.render();
+    const line = descendants(tree, node => node.props?.['data-testid'] === 'current-tma-trace')[0];
+    const current = descendants(tree, node => node.props?.['data-testid'] === 'current-tma-point')[0];
+    assert.equal(line.props.points.length, 2);
+    assert.deepEqual(line.props.points.at(-1), { x: 360, y: current.props.cy });
+    assert.match(text(tree), /170\.0 cm/);
+    assert.ok(!text(tree).includes('999 cm'));
   } finally { ui.restore(); }
 });
 
-test('graph keeps observed replay TMA, synthetic rain and twelve projected levels as distinct traces', () => {
+test('switching a node moves the current point to that node and never reuses another node forecast', () => {
   const ui = mount();
   try {
     ui.render();
-    ui.streams[0].emit('state', snapshot({ simTimeSeconds: 300, tma: 170, rain: 24 }));
-    ui.streams[0].emit('state', snapshot({ simTimeSeconds: 600, tma: 172, rain: 36 }));
+    const state = snapshot({ tma: 70 });
+    state.cupNodes.find(node => node.id === 'N2').tmaCm = 100;
+    ui.streams[0].emit('state', state);
     ui.streams[0].emit('forecast', sampleForecast);
-    byText(ui.render(), 'button', 'View Graph').props.onClick();
+    byText(ui.render(), 'button', 'Forecast Graph').props.onClick();
     let tree = ui.render();
-    const chart = descendants(tree, (node) => node.type === 'svg' && node.props?.['aria-label'] === 'Grafik TMA N1')[0];
-    assert.ok(chart);
-    const current = descendants(chart, (node) => node.props?.['data-testid'] === 'current-tma-trace')[0];
-    const rain = descendants(chart, (node) => node.props?.['data-testid'] === 'synthetic-rain-trace')[0];
-    const future = descendants(chart, (node) => node.props?.['data-testid'] === 'forecast-tma-trace')[0];
-    assert.ok(current?.props.points && rain?.props.points && future?.props.points);
-    assert.notEqual(current.props.points, future.props.points);
-    assert.match(future.props.strokeDasharray, /\d/);
-    assert.match(text(tree), /Rain.*Current TMA.*Replay forecast/s);
-    assert.equal(descendants(tree, (node) => node.type === 'select' && node.props?.value === 'N1')
-      .some((select) => descendants(select, (node) => node.type === 'option').length === 9), true);
-    ui.streams[0].emit('state', snapshot({ status: 'stopped', simTimeSeconds: 600 }));
+    const oldPoint = descendants(tree, node => node.props?.['data-testid'] === 'current-tma-point')[0];
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace').length, 1);
+    descendants(tree, node => node.props?.['data-testid'] === 'simulation-node-N2')[0].props.onClick();
     tree = ui.render();
-    assert.equal(descendants(tree, (node) => node.props?.['data-testid'] === 'forecast-tma-trace').length, 0);
+    const newPoint = descendants(tree, node => node.props?.['data-testid'] === 'current-tma-point')[0];
+    assert.notEqual(newPoint.props.cy, oldPoint.props.cy);
+    assert.equal(newPoint.props.cy, 190 - 100 / 260 * 180);
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace').length, 0);
+    assert.match(text(descendants(tree, node => node.props?.['data-testid'] === 'simulation-node-N2')[0]), /100\.0 cm/);
   } finally { ui.restore(); }
 });
 
-test('forecast events stay keyed by node; temporarily unavailable N2 never erases the N1 forecast', () => {
+test('replay prediction begins at the current simulation point and ends at +30 minutes', () => {
+  const ui = mount();
+  try {
+    ui.render();
+    ui.streams[0].emit('state', snapshot({ tma: 172 }));
+    ui.streams[0].emit('forecast', sampleForecast);
+    byText(ui.render(), 'button', 'Forecast Graph').props.onClick();
+    let tree = ui.render();
+    const chart = descendants(tree, node => node.props?.['role'] === 'img' && node.props?.['aria-label'] === 'Water level forecast Pos Depok')[0];
+    const traces = descendants(chart, node => node.props?.['data-testid'] === 'forecast-tma-trace');
+    assert.equal(traces.length, 1);
+    assert.equal(traces[0].props['data-testid'], 'forecast-tma-trace');
+    assert.equal(traces[0].props.strokeDasharray, '1 7');
+    assert.equal(traces[0].props.type, 'monotoneX');
+    assert.equal(traces[0].props.points.length, 7);
+    assert.equal(traces[0].props.points.at(-1).x, 712);
+    const current = descendants(chart, node => node.props?.['data-testid'] === 'current-tma-point')[0];
+    assert.deepEqual(traces[0].props.points[0], { x: 360, y: current.props.cy });
+    assert.match(text(tree), /Estimate \+30 min · 205\.0 cm/);
+    assert.match(text(tree), /Synthetic replay forecast/);
+    ui.streams[0].emit('state', snapshot({ status: 'stopped' }));
+    tree = ui.render();
+    assert.equal(descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace').length, 0);
+  } finally { ui.restore(); }
+});
+
+test('forecast graph retains per-node forecasts and rejects missing thresholds', () => {
   const ui = mount();
   try {
     ui.render();
     ui.streams[0].emit('state', snapshot());
     ui.streams[0].emit('forecast', sampleForecast);
-    ui.streams[0].emit('forecast', { ...sampleForecast, nodeId: 'N5', predictedTmaCm: { '30': 301, '60': 322 } });
-    ui.streams[0].emit('forecast', { runId: 'run-1', nodeId: 'N2', issuedAt: sampleForecast.issuedAt, status: 'unavailable', reason: 'model_unavailable' });
+    ui.streams[0].emit('forecast', { ...sampleForecast, nodeId: 'N2', thresholdBanjirCm: null, crossingWithin: { '30': null, '60': null } });
+    byText(ui.render(), 'button', 'Forecast Graph').props.onClick();
     let tree = ui.render();
-    const panel = () => descendants(tree, (node) => node.props?.['data-testid'] === 'ciliwung-forecast')[0];
-    const selectNode = (nodeId) => {
-      descendants(panel(), (node) => node.type === 'select' && node.props?.['aria-label'] === 'Forecast node')[0]
-        .props.onChange({ target: { value: nodeId } });
-      tree = ui.render();
-    };
-    assert.match(text(panel()), /205\.0 cm/);
-    selectNode('N5');
-    assert.match(text(panel()), /301\.0 cm/);
-    selectNode('N2');
-    assert.match(text(panel()), /Forecast unavailable: model_unavailable/);
-    assert.doesNotMatch(text(panel()), /301\.0 cm|205\.0 cm/);
-    selectNode('N1');
-    assert.match(text(panel()), /205\.0 cm/);
-  } finally { ui.restore(); }
-});
-
-test('headwater UP1 presents forecasted levels but never claims flood-safe without a defined threshold', () => {
-  const ui = mount();
-  try {
-    ui.render();
-    ui.streams[0].emit('state', snapshot());
-    ui.streams[0].emit('forecast', { ...sampleForecast, nodeId: 'UP1', method: 'lstm_synthetic_v2',
-      thresholdBanjirCm: null, crossingWithin: { '30': null, '60': null },
-      inputProvenance: { upstreamFeature: 'self_proxy_no_upstream_gauge' } });
-    let tree = ui.render();
-    descendants(tree, (node) => node.type === 'select' && node.props?.['aria-label'] === 'Forecast node')[0]
-      .props.onChange({ target: { value: 'UP1' } });
+    const trace = () => descendants(tree, node => node.props?.['data-testid'] === 'forecast-tma-trace');
+    assert.equal(trace().length, 1);
+    descendants(tree, node => node.props?.['data-testid'] === 'simulation-node-N2')[0].props.onClick();
     tree = ui.render();
-    const panel = descendants(tree, (node) => node.props?.['data-testid'] === 'ciliwung-forecast')[0];
-    assert.match(text(panel), /UP1.*205\.0 cm.*265\.0 cm/s);
-    assert.match(text(panel), /no flood threshold defined/i);
-    assert.match(text(panel), /upstream.*self.proxy/i);
-    assert.doesNotMatch(text(panel), /current stage below flood threshold|threshold crossing not indicated|flood threshold already reached/i);
-  } finally { ui.restore(); }
-});
-
-test('a mapped node other than UP1 rejects missing flood classification instead of implying safety', () => {
-  const ui = mount();
-  try {
-    ui.render();
-    ui.streams[0].emit('state', snapshot());
-    ui.streams[0].emit('forecast', { ...sampleForecast, nodeId: 'N2', thresholdBanjirCm: null,
-      crossingWithin: { '30': null, '60': null } });
-    let tree = ui.render();
-    descendants(tree, (node) => node.type === 'select' && node.props?.['aria-label'] === 'Forecast node')[0]
-      .props.onChange({ target: { value: 'N2' } });
+    assert.equal(trace().length, 0);
+    descendants(tree, node => node.props?.['data-testid'] === 'simulation-node-N1')[0].props.onClick();
     tree = ui.render();
-    const panel = descendants(tree, (node) => node.props?.['data-testid'] === 'ciliwung-forecast')[0];
-    assert.match(text(panel), /Forecast unavailable/);
-    assert.equal(descendants(panel, (node) => node.props?.['data-testid'] === 'forecast-30').length, 0);
-  } finally { ui.restore(); }
-});
-
-test('an N3 forecast selection requests its endpoint and renders +30/+60 when available', async () => {
-  const ui = mount({ latest: { ...sampleForecast, nodeId: 'N3', method: 'slope_synthetic_v2', predictedTmaCm: { '30': 206, '60': 270 } } });
-  try {
-    ui.render();
-    ui.streams[0].emit('state', snapshot());
-    let tree = ui.render();
-    descendants(tree, (node) => node.type === 'select' && node.props?.['aria-label'] === 'Forecast node')[0]
-      .props.onChange({ target: { value: 'N3' } });
-    ui.render();
-    await tick();
-    tree = ui.render();
-    const panel = descendants(tree, (node) => node.props?.['data-testid'] === 'ciliwung-forecast')[0];
-    assert.match(text(panel), /N3.*206\.0 cm.*270\.0 cm/s);
-    assert.equal(ui.calls.filter((call) => call.url.includes('/api/ciliwung-forecast/latest?nodeId=N3')).length, 1);
+    assert.equal(trace().length, 1);
   } finally { ui.restore(); }
 });
 
@@ -422,10 +554,10 @@ test('legacy graph restores the backend-selected rainfall profile after a page r
     const state = { ...snapshot({ runId: 'legacy-selected-sedang', mode: 'legacy', episodeId: null, status: 'completed', simTimeSeconds: 10 }), scenario: 'sedang' };
     ui.streams[0].emit('state', state);
     let tree = ui.render();
-    byText(tree, 'button', 'View Graph').props.onClick();
+    byText(tree, 'button', 'Forecast Graph').props.onClick();
     tree = ui.render();
-    assert.match(text(tree), /Hujan Sedang · TMA Graph/);
-    assert.doesNotMatch(text(tree), /Hujan Ringan · TMA Graph/);
+    assert.match(text(tree), /Legacy simulation · Hujan Sedang/);
+    assert.doesNotMatch(text(tree), /Legacy simulation · Hujan Ringan/);
   } finally { ui.restore(); }
 });
 
@@ -433,9 +565,7 @@ test('legacy profile still uses scenario start and never presents a synthetic fo
   const ui = mount();
   try {
     let tree = ui.render();
-    const panel = descendants(tree, (node) => node.props?.['data-testid'] === 'ciliwung-forecast')[0];
-    assert.doesNotMatch(text(panel), /SYNTHETIC DEMO/);
-    assert.match(text(panel), /legacy.*no live forecast/i);
+    assert.equal(descendants(tree, (node) => node.props?.['data-testid'] === 'ciliwung-forecast').length, 0);
     byText(tree, 'button', 'Hujan Sedang').props.onClick();
     tree = ui.render();
     await byText(tree, 'button', 'Start Simulation').props.onClick();

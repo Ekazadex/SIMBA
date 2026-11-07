@@ -191,6 +191,16 @@ export default function SCADADashboard({
     }
   };
 
+  const [weatherContext, setWeatherContext] = useState<{ status?: string; source?: string; weatherDesc?: string; validFrom?: string; validTo?: string; temperatureC?: number | null; humidityPercent?: number | null; windSpeedKph?: number | null; windDirection?: string | null; visibility?: string | null; weatherIcon?: string | null; location?: { desa?: string; kecamatan?: string; kotkab?: string } } | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch('/api/ciliwung-weather/context', { signal: controller.signal })
+      .then(response => response.ok ? response.json() : null)
+      .then(data => setWeatherContext(data))
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
+
   // Live Grounded Weather & Sound Warning systems
   const [liveWeather, setLiveWeather] = useState<{
     precipitation_mm: string | number;
@@ -1119,69 +1129,46 @@ export default function SCADADashboard({
   ] : [];
 
   return (
-    <div id="scada-dashboard-root" className="grid grid-cols-1 lg:grid-cols-12 gap-6 pb-12">
-      
-      {/* HARDWARE DATA PAUSE & REAL-TIME QUOTA SAVER BANNER */}
-      <div id="scada-hardware-pause-banner" className={`col-span-12 p-4 rounded-2xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${
-        latestReading?.source?.includes('Hardware')
-          ? isDark ? 'bg-emerald-950/20 border-emerald-500/30 text-emerald-400' : 'bg-emerald-50 border-emerald-200 text-emerald-800'
-          : isDark ? 'bg-black/40 border-white/10 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
-      }`}>
-        <div className="flex items-center gap-3">
-          <span className="relative flex h-3 w-3 shrink-0">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-          </span>
-          <div className="text-xs">
-            <div className="flex items-center gap-2 font-mono font-bold tracking-wider uppercase">
-              {config?.auto_simulation && (latestReading?.source?.includes('Simulator') || latestReading?.source?.includes('Scenario')) ? (
-                <>
-                  <Activity className="w-3.5 h-3.5 text-amber-400" />
-                  <span>{language === 'en' ? 'TELEMETRY SOURCE: SIMULATOR (CONTROLLED TEST MODE)' : 'SUMBER TELEMETRI: SIMULATOR (MODE PENGUJIAN)'}</span>
-                </>
-              ) : latestReading?.source?.includes('Hardware') && !isDeviceOffline ? (
-                <>
-                  <Radio className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>{language === 'en' ? 'TELEMETRY SOURCE: ESP32 HARDWARE (360-SAMPLE BATCH)' : 'SUMBER TELEMETRI: HARDWARE ESP32 (BATCH 360 SAMPEL)'}</span>
-                </>
-              ) : (
-                <>
-                  <Activity className="w-3.5 h-3.5 text-[#3B82F6]" />
-                  <span>{language === 'en' ? 'MONITORING STATUS: STANDBY PAUSED (LATEST REPORT)' : 'STATUS MONITORING: STANDBY PAUSED (LAPORAN TERAKHIR)'}</span>
-                </>
-              )}
-            </div>
-            <span className="text-[11px] opacity-80 mt-0.5 block font-sans">
-              {timeAgoText} — {language === 'en' 
-                ? 'No repeated Firestore reads. System stays paused on latest report until new transmission arrives.' 
-                : 'Tidak ada pembacaan Firestore berulang. Sistem tetap terjeda pada laporan terakhir hingga paket transmisi baru masuk.'}
-            </span>
-          </div>
-        </div>
-        
-        <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto justify-end">
-          {hasBatchData && (
-            <span className="px-2.5 py-1 bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 rounded-lg text-[10px] font-mono font-bold shrink-0 flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              {language === 'en' ? `Array of ${rawBatch.length || 360} Points Ready` : `Array ${rawBatch.length || 360} Titik Siap Ditampilkan`}
-            </span>
-          )}
-
-          {/* Primary System Alert Level Badge (Neatly Integrated into Header Banner) */}
-          <div className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold uppercase tracking-wider ${alertBg}`}>
-            <span className={`w-2 h-2 rounded-full ${alertLed} inline-block`} />
-            <span className="font-mono">{alertLabel}</span>
-          </div>
+    <div id="scada-dashboard-root" className="space-y-6 pb-12">
+      <h1 className="text-2xl sm:text-3xl font-bold">{language === 'en' ? 'Monitoring overview' : 'Ringkasan Pemantauan'}</h1>
+      <div id="scada-hardware-pause-banner" role="status" className={`rounded-2xl border p-5 flex flex-wrap items-center justify-between gap-3 ${isDark ? 'bg-slate-800/70 border-slate-700' : 'bg-blue-50 border-blue-100'}`}>
+        <div className="flex items-start gap-3"><Info className="w-6 h-6 text-blue-500 shrink-0" /><div>
+          <p className="font-bold text-lg">{!latestReading ? (language === 'en' ? 'Sensor data unavailable' : 'Data sensor belum tersedia') : isDeviceOffline ? (language === 'en' ? 'Sensor offline · last reading' : 'Sensor offline · data terakhir') : (language === 'en' ? 'Sensor data available' : 'Data sensor tersedia')}</p>
+          <p className="text-sm opacity-75">{!latestReading ? (language === 'en' ? 'Waiting for sensor data' : 'Menunggu data dari sensor') : timeAgoText}</p>
+          {latestReading && <p className="text-xs opacity-70 mt-1">{language === 'en' ? 'Source' : 'Sumber'}: {latestReading.source || 'Sensor'}</p>}
+        </div></div>
+        {latestReading && !isDeviceOffline && <div className={`px-3 py-2 rounded-xl text-xs font-bold ${alertBg}`}><span className={`w-2 h-2 rounded-full ${alertLed} inline-block mr-2`} />{alertLabel}</div>}
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-5 items-stretch">
+        <div className="lg:col-span-3 min-w-0"><CiliwungHardwareLiveView theme={theme} language={language} latestReading={latestReading} readings={readingsList} config={config ?? {}} compact /></div>
+        <div className="lg:col-span-1 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-5 content-start auto-rows-min">
+          <section className={`${themeCard} rounded-2xl p-6 flex flex-col gap-4`}>
+            <div className="flex items-center justify-between gap-2"><h2 className="font-bold text-lg flex items-center gap-2"><CloudRain className="w-5 h-5 text-sky-500" />{language === 'en' ? 'Weather' : 'Cuaca Saat Ini'}</h2><span className="text-xs opacity-70">{weatherContext?.source || 'BMKG'}</span></div>
+            {weatherContext?.status === 'available' ? <div className="space-y-4">
+              <p className="text-xs font-bold tracking-wider text-sky-500 uppercase">{weatherContext.source === 'BMKG' ? 'Prakiraan BMKG' : 'Open-Meteo'}</p>
+              <div className="flex items-center gap-3">
+                {weatherContext.weatherIcon ? <img src={weatherContext.weatherIcon} alt="" className="w-14 h-14 object-contain" referrerPolicy="no-referrer" /> : <CloudRain className="w-12 h-12 text-sky-400 shrink-0" />}
+                <div><p className="text-3xl font-bold">{weatherContext.temperatureC != null ? `${weatherContext.temperatureC}°C` : '—'} <span className="text-sm font-semibold">{weatherContext.weatherDesc || ''}</span></p><p className="text-xs opacity-70 mt-1">{weatherContext.location ? [weatherContext.location.desa, weatherContext.location.kecamatan, weatherContext.location.kotkab].filter(Boolean).join(', ') : 'Kukusan, Depok'}</p></div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                {[[language === 'en' ? 'Humidity' : 'Kelembapan', weatherContext.humidityPercent != null ? `${weatherContext.humidityPercent}%` : '—'], [language === 'en' ? 'Wind speed' : 'Kecepatan angin', weatherContext.windSpeedKph != null ? `${weatherContext.windSpeedKph.toLocaleString('id-ID')} km/h` : '—'], [language === 'en' ? 'Wind direction' : 'Arah angin', weatherContext.windDirection || '—'], [language === 'en' ? 'Visibility' : 'Jarak pandang', weatherContext.visibility || '—']].map(([label, value]) => <div key={label} className={`rounded-xl border p-3 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-200'}`}><span className="block opacity-70">{label}</span><strong>{value}</strong></div>)}
+              </div>
+              {weatherContext.validFrom && <p className="text-xs opacity-60">{language === 'en' ? 'Valid from' : 'Berlaku mulai'} {new Date(weatherContext.validFrom).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })} WIB</p>}
+            </div> : <p className="text-sm opacity-70">{language === 'en' ? 'Weather data unavailable' : 'Data cuaca belum tersedia'}</p>}
+          </section>
+          <section className={`${themeCard} rounded-2xl p-6 flex flex-col gap-4`}>
+            <h2 className="font-bold text-lg flex items-center gap-2"><Droplet className="w-5 h-5 text-teal-500" />{language === 'en' ? 'Water level' : 'Tinggi Muka Air'}</h2>
+            <p className="text-4xl font-bold">{latestReading && Number.isFinite(latestReading.water_level) ? latestReading.water_level.toFixed(1) : '—'} <span className="text-lg">cm</span></p>
+            <p className="text-sm opacity-70">{!latestReading ? (language === 'en' ? 'Waiting for sensor data' : 'Menunggu data sensor') : isDeviceOffline ? (language === 'en' ? 'Last reading · sensor offline' : 'Data terakhir · sensor offline') : timeAgoText}</p>
+          </section>
         </div>
       </div>
-
-      <CiliwungHardwareLiveView
-        theme={theme}
-        latestReading={latestReading}
-        config={config ?? {}}
-        onEnterSimulation={onEnterSimulation}
-      />
-
+      {onEnterSimulation && <section className={`rounded-2xl border p-6 flex flex-wrap items-center justify-between gap-4 ${isDark ? 'bg-teal-950/30 border-teal-800' : 'bg-teal-50 border-teal-100'}`}>
+        <div><h2 className="text-xl font-bold">{language === 'en' ? 'Try simulation' : 'Coba simulasi'}</h2><p className="text-sm opacity-75 mt-1">{language === 'en' ? 'Explore potential flooding in this area using simulated data (not real sensor data).' : 'Lihat gambaran potensi genangan di wilayah ini menggunakan data buatan (bukan data sensor asli).'}</p></div>
+        <button type="button" onClick={onEnterSimulation} className="rounded-xl bg-teal-700 hover:bg-teal-800 text-white px-5 py-3 font-bold">{language === 'en' ? 'Try simulation' : 'Coba simulasi'} →</button>
+      </section>}
+      <details className="group"><summary className="cursor-pointer font-semibold py-3">{language === 'en' ? 'View sensor details, charts and analysis' : 'Lihat detail sensor, grafik, dan analisis'}</summary>
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 pt-4">
       {/* DETAILED MEASUREMENT GAUGES & METRICS */}
       <div id="measurement-grid" className="col-span-12 lg:col-span-4 flex flex-col gap-6">
         
@@ -2006,6 +1993,8 @@ export default function SCADADashboard({
 
       </div>
 
+      </div>
+      </details>
     </div>
   );
 }

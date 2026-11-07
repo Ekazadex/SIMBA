@@ -35,6 +35,9 @@ export function parseBmkgForecastContext(payload, { adm4 = DEFAULT_ADM4, asOf = 
     validFrom: new Date(row.datetime).toISOString(),
     validTo: new Date(Date.parse(row.datetime) + BMKG_PERIOD_MS).toISOString(),
     acquiredAt, weatherDesc: row.weather_desc,
+    temperatureC: Number.isFinite(row.t) ? row.t : null, humidityPercent: Number.isFinite(row.hu) ? row.hu : null,
+    windSpeedKph: Number.isFinite(row.ws) ? row.ws : null, windDirection: typeof row.wd === 'string' ? row.wd : null,
+    visibility: typeof row.vs_text === 'string' && row.vs_text.trim() ? row.vs_text : Number.isFinite(row.vs) ? `${(row.vs / 1000).toLocaleString('id-ID')} km` : null, weatherIcon: typeof row.image === 'string' ? row.image : null,
     forecastPrecipitationMm: tp, missingFields: { tp: tp === null },
   };
 }
@@ -50,6 +53,9 @@ export function parseOpenMeteoContext(payload, { acquiredAt = new Date().toISOSt
     acquiredAt, validFrom: Number.isFinite(date) ? new Date(date).toISOString() : null,
     validTo: Number.isFinite(date) && Number.isFinite(current.interval) ? new Date(date + current.interval * 1000).toISOString() : null,
     issuedAt: null, weatherCode: current.weather_code ?? null,
+    temperatureC: Number.isFinite(current.temperature_2m) ? current.temperature_2m : null, humidityPercent: Number.isFinite(current.relative_humidity_2m) ? current.relative_humidity_2m : null,
+    windSpeedKph: Number.isFinite(current.wind_speed_10m) ? current.wind_speed_10m : null, windDirection: Number.isFinite(current.wind_direction_10m) ? `${current.wind_direction_10m}°` : null,
+    visibility: Number.isFinite(current.visibility) ? `${(current.visibility / 1000).toLocaleString('id-ID')} km` : null,
     forecastPrecipitationMm: precipitation, missingFields: { precipitation: precipitation === null },
   };
 }
@@ -66,7 +72,7 @@ export function createWeatherContextHandler({ fetchImpl = fetch, now = () => new
       if (context.status === 'available') return response.json(context);
     } catch { /* Explicitly separate fallback provider, never call its data BMKG. */ }
     try {
-      const result = await fetchImpl('https://api.open-meteo.com/v1/forecast?latitude=-6.4025&longitude=106.7942&current=temperature_2m,relative_humidity_2m,precipitation,weather_code&timezone=Asia/Jakarta', { signal: AbortSignal.timeout(6000) });
+      const result = await fetchImpl('https://api.open-meteo.com/v1/forecast?latitude=-6.4025&longitude=106.7942&current=temperature_2m,relative_humidity_2m,precipitation,weather_code,wind_speed_10m,wind_direction_10m,visibility&wind_speed_unit=kmh&timezone=Asia/Jakarta', { signal: AbortSignal.timeout(6000) });
       if (!result.ok) throw new Error('Open-Meteo unavailable');
       return response.json(parseOpenMeteoContext(await result.json(), { acquiredAt }));
     } catch {

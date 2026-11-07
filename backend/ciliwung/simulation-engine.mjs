@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
 const DEFAULT_INTERVAL_MS = 500;
-export const SPEED_MULTIPLIERS = Object.freeze([1, 10, 25, 50]);
+export const SPEED_MULTIPLIERS = Object.freeze([1, 10, 25, 50, 150]);
 const DEFAULT_SPEED_MULTIPLIER = SPEED_MULTIPLIERS[0];
 const EPSILON = 1e-9;
+const PROJECTION_SEED = Symbol('legacy_projection_seed');
 const DEFAULT_CUPCARBON_STATE = Object.freeze({
   status: 'not_verified',
   warning: 'CupCarbon belum diverifikasi aktif. Backend tetap menjalankan scenario.',
@@ -11,11 +12,13 @@ const DEFAULT_CUPCARBON_STATE = Object.freeze({
   activeNodeCount: 0,
 });
 
+// UP3/UP4 use 58 cm as an uncalibrated legacy-demo starting value;
+// syntheticBaselines retain the reference of the existing replay/model dataset.
 export const NODE_REGISTRY = Object.freeze([
   { id: 'UP1', name: 'Puncak', telemetryName: 'Node_1_Puncak', cupcarbonNodeId: 1, script: 'puncak.py', threeDNodeId: 'UP1', baselineTmaCm: 40, thresholds: { siaga: 70, banjir: Infinity }, controlPort: 5101 },
   { id: 'UP2', name: 'Katulampa', telemetryName: 'Node_2_Katulampa', cupcarbonNodeId: 2, script: 'katulampa.py', threeDNodeId: 'UP2', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5102 },
-  { id: 'UP3', name: 'Sukaraja', telemetryName: 'Node_3_Sukaraja', cupcarbonNodeId: 3, script: 'sukaraja.py', threeDNodeId: 'UP3', baselineTmaCm: 100, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5103 },
-  { id: 'UP4', name: 'Cibinong', telemetryName: 'Node_4_Cibinong', cupcarbonNodeId: 4, script: 'cibinong.py', threeDNodeId: 'UP4', baselineTmaCm: 150, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5104 },
+  { id: 'UP3', name: 'Sukaraja', telemetryName: 'Node_3_Sukaraja', cupcarbonNodeId: 3, script: 'sukaraja.py', threeDNodeId: 'UP3', baselineTmaCm: 58, syntheticBaselineTmaCm: 100, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5103 },
+  { id: 'UP4', name: 'Cibinong', telemetryName: 'Node_4_Cibinong', cupcarbonNodeId: 4, script: 'cibinong.py', threeDNodeId: 'UP4', baselineTmaCm: 58, syntheticBaselineTmaCm: 150, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5104 },
   { id: 'N1', name: 'Pos Depok', telemetryName: 'N1 Pos Depok', cupcarbonNodeId: 5, script: 'pos_depok.py', threeDNodeId: 'N1', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5105 },
   { id: 'N2', name: 'Ciliwung Stage 1', telemetryName: 'N2 Ciliwung Stage 1', cupcarbonNodeId: 20, script: 'ciliwung_stage1.py', threeDNodeId: 'N2', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5106 },
   { id: 'N3', name: 'Ciliwung Stage 2', telemetryName: 'N3 Ciliwung Stage 2', cupcarbonNodeId: 21, script: 'ciliwung_stage2.py', threeDNodeId: 'N3', baselineTmaCm: 60, thresholds: { siaga: 180, banjir: 280 }, controlPort: 5107 },
@@ -29,6 +32,10 @@ const UPSTREAM_INPUT_NODE = Object.freeze({
   N2: 'N1', N3: 'N2', N4: 'N3', N5: 'N4',
 });
 
+// Scale all three demo scenarios proportionally so light rain finishes within
+// four simulated hours while preserving the relative local rise rates.
+const LEGACY_DURATION_FACTOR = 38.3 / 70;
+const LEGACY_DURATION_SCALE = Object.freeze({ ringan: 70 * LEGACY_DURATION_FACTOR, sedang: 42 * LEGACY_DURATION_FACTOR, lebat: 80 * LEGACY_DURATION_FACTOR });
 const REACH_DELAY_SECONDS = Object.freeze([20, 25, 30, 35, 40, 45, 50, 55]);
 const REACH_ATTENUATION = Object.freeze([0.92, 0.90, 0.88, 0.86, 0.84, 0.82, 0.80, 0.78]);
 
@@ -37,7 +44,7 @@ export const SCENARIO_PROFILES = Object.freeze({
     id: 'ringan',
     label: 'Hujan Ringan',
     description: 'Hujan ringan di hulu. Scenario selesai ketika Puncak masuk status SIAGA.',
-    localRiseCmPerSecond: Object.freeze([0.08, 0, 0, 0, 0, 0, 0, 0, 0]),
+    localRiseCmPerSecond: Object.freeze([0.08, 0, 0, 0, 0, 0, 0, 0, 0].map((rate) => rate / LEGACY_DURATION_SCALE.ringan)),
     targetNodeId: 'UP1',
     targetThresholdCm: 70,
   }),
@@ -45,7 +52,7 @@ export const SCENARIO_PROFILES = Object.freeze({
     id: 'sedang',
     label: 'Hujan Sedang',
     description: 'Hujan sedang dengan kontribusi lokal pada koridor utama. Scenario selesai ketika Stage 2 masuk status SIAGA.',
-    localRiseCmPerSecond: Object.freeze([0.28, 0, 0, 0, 0.08, 0, 0.06, 0.05, 0.04]),
+    localRiseCmPerSecond: Object.freeze([0.28, 0, 0, 0, 0.08, 0, 0.06, 0.05, 0.04].map((rate) => rate / LEGACY_DURATION_SCALE.sedang)),
     targetNodeId: 'N3',
     targetThresholdCm: 180,
   }),
@@ -53,7 +60,7 @@ export const SCENARIO_PROFILES = Object.freeze({
     id: 'lebat',
     label: 'Hujan Lebat',
     description: 'Hujan lebat dengan rambatan sampai hilir. Scenario selesai ketika Manggarai mencapai BANJIR_JAKARTA.',
-    localRiseCmPerSecond: Object.freeze([0.55, 0, 0, 0, 0.30, 0.25, 0.22, 0.20, 0.40]),
+    localRiseCmPerSecond: Object.freeze([0.55, 0, 0, 0, 0.30, 0.25, 0.22, 0.20, 0.40].map((rate) => rate / LEGACY_DURATION_SCALE.lebat)),
     targetNodeId: 'N5',
     targetThresholdCm: 280,
   }),
@@ -73,13 +80,15 @@ function buildNodes(storageRiseCm, replayFrame = null) {
   return NODE_REGISTRY.map((node, index) => {
     const replayNode = replayFrame?.nodes.find((item) => item.id === node.id);
     const tmaCm = replayNode?.tmaCm ?? node.baselineTmaCm + storageRiseCm[index];
+    // Synthetic replay retains the original dataset's visual reference level.
+    const visualBaselineCm = replayNode ? (node.syntheticBaselineTmaCm ?? node.baselineTmaCm) : node.baselineTmaCm;
     return {
       id: node.id,
       name: node.name,
       cupcarbonNodeId: node.cupcarbonNodeId,
       threeDNodeId: node.threeDNodeId,
       tmaCm: Number(tmaCm.toFixed(2)),
-      stageRiseM: Number((Math.max(0, tmaCm - node.baselineTmaCm) / 100).toFixed(4)),
+      stageRiseM: Number((Math.max(0, tmaCm - visualBaselineCm) / 100).toFixed(4)),
       ...(replayNode ? {
         rainRateMmH: replayNode.rainRateMmH, rainMm5m: replayNode.rainMm5m,
         rainSource: replayNode.rainSource, tmaSource: replayNode.tmaSource,
@@ -141,6 +150,13 @@ export function createCiliwungEngine(options = {}) {
   let chartHistory = [];
   const listeners = new Set();
   const seenCupCarbonNodes = new Set();
+  // Only an internal, timer-free fork can receive a projection seed.
+  if (options[PROJECTION_SEED]) {
+    const seed = options[PROJECTION_SEED];
+    state = clone(seed.state);
+    storageRiseCm = [...seed.storageRiseCm];
+    pendingEvents = clone(seed.pendingEvents);
+  }
 
   function publish(metadata = {}) {
     const sendCupCarbon = metadata.sendCupCarbon !== false;
@@ -446,6 +462,33 @@ export function createCiliwungEngine(options = {}) {
     return clone(state);
   }
 
+  function getLegacyProjection(nodeId) {
+    if (!NODE_REGISTRY.some((node) => node.id === nodeId)) throw new RangeError(`Unknown node: ${nodeId}`);
+    if (state.status !== 'running' || replay || !state.runId) {
+      return { status: 'unavailable', reason: 'no_active_legacy_simulation', nodeId };
+    }
+    // Run the same deterministic engine on a private copy. It has no timer,
+    // subscribers or CupCarbon side effects and stops at the real scenario target.
+    const issuedSimTimeSeconds = state.simTimeSeconds;
+    const fork = createCiliwungEngine({ autoStart: false, intervalMs,
+      [PROJECTION_SEED]: { state, storageRiseCm, pendingEvents } });
+    const points = [{ afterSeconds: 0, tmaCm: state.cupNodes.find((node) => node.id === nodeId).tmaCm }];
+    // Keep five extra minutes so the client can show a rolling +30-minute
+    // horizon as the live simulation advances, without recomputing every tick.
+    const projectionHorizonSeconds = 2100;
+    let projected = fork.getState();
+    while (projected.status === 'running' && projected.simTimeSeconds - issuedSimTimeSeconds < projectionHorizonSeconds - EPSILON) {
+      const remaining = projectionHorizonSeconds - (projected.simTimeSeconds - issuedSimTimeSeconds);
+      projected = fork.advance(Math.min(intervalMs / 1000, remaining / projected.speedMultiplier));
+      const elapsed = projected.simTimeSeconds - issuedSimTimeSeconds;
+      points.push({ afterSeconds: Number(elapsed.toFixed(3)),
+        tmaCm: projected.cupNodes.find((node) => node.id === nodeId).tmaCm });
+    }
+    return { status: 'available', method: 'legacy_simulation_projection', nodeId, runId: state.runId,
+      issuedSimTimeSeconds, speedMultiplier: state.speedMultiplier, points, scenarioCompletes: projected.status === 'completed',
+      quality: 'experimental_simulation_only' };
+  }
+
   function getCupCarbonCommands() {
     return state.cupNodes.map((node) => ({
       type: 'node_update',
@@ -465,6 +508,7 @@ export function createCiliwungEngine(options = {}) {
     getReplayHistory,
     getReplayChartHistory,
     getChartHistory,
+    getLegacyProjection,
     setSpeedMultiplier,
     stop,
     reset,

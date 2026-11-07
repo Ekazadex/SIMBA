@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Map2D } from './CiliwungHardwareLiveView';
+import { Curve } from 'recharts';
+import graphScale from './ciliwung-graph-scale.json';
 
-type SimulationView = 'simulation' | 'graph' | 'map2d';
+type SimulationView = 'map3d' | 'graph' | 'map2d';
 type ScenarioId = 'ringan' | 'sedang' | 'lebat';
-type SpeedMultiplier = 1 | 10 | 25 | 50;
+type SpeedMultiplier = 1 | 10 | 25 | 50 | 150;
 type SimulationMode = 'legacy' | 'rain_replay';
 type Episode = { episodeId: string; label?: string; name?: string };
 
@@ -40,19 +42,6 @@ type CiliwungForecast = {
   quality?: string;
 };
 
-type WeatherContext = {
-  source?: string;
-  status: 'available' | 'unavailable';
-  reason?: string;
-  kind?: string;
-  location?: { desa?: string; kecamatan?: string; kotkab?: string };
-  weatherDesc?: string;
-  issuedAt?: string | null;
-  validFrom?: string | null;
-  validTo?: string | null;
-  acquiredAt?: string | null;
-};
-
 type CiliwungState = {
   runId: string | null;
   mode?: 'legacy' | 'rain_replay' | 'synthetic_demo' | string;
@@ -71,33 +60,21 @@ type CiliwungState = {
   updatedAt: number;
 };
 
+type LegacyProjection = {
+  status: 'available';
+  method: 'legacy_simulation_projection';
+  runId: string;
+  nodeId: string;
+  issuedSimTimeSeconds: number;
+  speedMultiplier: SpeedMultiplier;
+  points: Array<{ afterSeconds: number; tmaCm: number }>;
+  scenarioCompletes: boolean;
+};
+
 type HistoryPoint = {
-  runId: string | null;
+  runId: string;
   time: number;
   values: Record<string, number>;
-  rainRatesMmH: Record<string, number>;
-};
-
-type ScenarioPreview = {
-  scenarioId: ScenarioId;
-  label: string;
-  nodeId: string;
-  issuedAt: string;
-  issueIndex: number;
-  currentSyntheticTmaCm: number;
-  rainfallDepthMmPerCatchment: Record<string, number>;
-  predictedTmaCm: { '30': number; '60': number };
-  trajectoryCm: number[];
-  method: string;
-  modelVersion: string;
-  quality: string;
-};
-
-type ScenarioPreviewResponse = {
-  nodeId: string;
-  datasetVersion: string;
-  quality: string;
-  previews: ScenarioPreview[];
 };
 
 const SIMULATION_UPSTREAM = [
@@ -115,8 +92,7 @@ const SCENARIOS: Array<{ id: ScenarioId; label: string; description: string }> =
 
 const MAIN_GRAPH_NODES = ['UP1', 'UP2', 'UP3', 'UP4', 'N1', 'N2', 'N3', 'N4', 'N5'];
 const FORECAST_NODES = new Set(MAIN_GRAPH_NODES);
-const SCENARIO_COLORS: Record<ScenarioId, string> = { ringan: '#38bdf8', sedang: '#f59e0b', lebat: '#fb7185' };
-const SPEED_OPTIONS: SpeedMultiplier[] = [1, 10, 25, 50];
+const SPEED_OPTIONS: SpeedMultiplier[] = [1, 10, 25, 50, 150];
 
 function formatTime(seconds: number) {
   const total = Math.max(0, Math.floor(seconds));
@@ -124,25 +100,9 @@ function formatTime(seconds: number) {
   return `${String(minutes).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
 }
 
-function formatWib(instant?: string, offsetMinutes = 0) {
-  const parsed = instant ? Date.parse(instant) : NaN;
-  if (!Number.isFinite(parsed)) return '—';
-  const formatted = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  }).format(new Date(parsed + offsetMinutes * 60_000));
-  return `${formatted} WIB`;
-}
-
 function statusLabel(status: CiliwungNode['status']) {
   if (status === 'BANJIR_JAKARTA') return 'BANJIR';
   return status;
-}
-
-function statusClass(status: CiliwungNode['status'], isDark: boolean) {
-  if (status === 'BANJIR_JAKARTA') return isDark ? 'text-rose-300 bg-rose-500/15 border-rose-500/30' : 'text-rose-700 bg-rose-50 border-rose-200';
-  if (status === 'SIAGA') return isDark ? 'text-amber-300 bg-amber-500/15 border-amber-500/30' : 'text-amber-700 bg-amber-50 border-amber-200';
-  return isDark ? 'text-emerald-300 bg-emerald-500/15 border-emerald-500/30' : 'text-emerald-700 bg-emerald-50 border-emerald-200';
 }
 
 export default function CiliwungSimulationPage({
@@ -161,24 +121,24 @@ export default function CiliwungSimulationPage({
   const [selectedEpisodeId, setSelectedEpisodeId] = useState('');
   const [episodeError, setEpisodeError] = useState<string | null>(null);
   const [selectedSpeed, setSelectedSpeed] = useState<SpeedMultiplier>(1);
-  const [activeView, setActiveView] = useState<SimulationView>('simulation');
+  const [activeView, setActiveView] = useState<SimulationView>('map2d');
   const [state, setState] = useState<CiliwungState | null>(null);
   const [forecasts, setForecasts] = useState<Record<string, CiliwungForecast>>({});
-  const [scenarioPreviews, setScenarioPreviews] = useState<ScenarioPreviewResponse | null>(null);
-  const [scenarioPreviewLoading, setScenarioPreviewLoading] = useState(false);
-  const [scenarioPreviewError, setScenarioPreviewError] = useState<string | null>(null);
-  const [weatherContext, setWeatherContext] = useState<WeatherContext | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
+  const [legacyProjection, setLegacyProjection] = useState<LegacyProjection | null>(null);
+  const [projectionError, setProjectionError] = useState(false);
   const [graphNodeId, setGraphNodeId] = useState('N1');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const lastHistoryKey = useRef<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const projectionRequestRef = useRef<symbol | null>(null);
+
+  useEffect(() => () => { projectionRequestRef.current = null; }, []);
 
   const apiBase = typeof window !== 'undefined' ? window.location.origin : '';
   const threeDUrl = useMemo(() => {
     const streamUrl = `${apiBase}/api/ciliwung-simulation/stream`;
-    return `http://127.0.0.1:8765/?mode=backend&ui=20261008-backend&api=${encodeURIComponent(streamUrl)}`;
+    return `http://127.0.0.1:8765/?mode=backend&ui=20261107-location-names&embed=dashboard&api=${encodeURIComponent(streamUrl)}`;
   }, [apiBase]);
 
   useEffect(() => {
@@ -202,26 +162,22 @@ export default function CiliwungSimulationPage({
   }, [apiBase]);
 
   useEffect(() => {
-    let active = true;
-    fetch(`${apiBase}/api/ciliwung-weather/context`)
-      .then(async (response) => {
-        if (!response.ok) throw new Error('weather_context_unavailable');
-        const payload = await response.json() as WeatherContext;
-        if (active) setWeatherContext(payload);
-      })
-      .catch(() => {
-        if (active) setWeatherContext({ status: 'unavailable', reason: 'weather_context_unavailable' });
-      });
-    return () => { active = false; };
-  }, [apiBase]);
-
-  useEffect(() => {
     const stream = new EventSource(`${apiBase}/api/ciliwung-simulation/stream`);
     eventSourceRef.current = stream;
     const handleState = (event: MessageEvent<string>) => {
       try {
         const next = JSON.parse(event.data) as CiliwungState;
         setState(next);
+        if (next.runId && next.status !== 'idle' && Number.isFinite(next.simTimeSeconds)) {
+          const point: HistoryPoint = { runId: next.runId, time: next.simTimeSeconds,
+            values: Object.fromEntries(next.cupNodes.filter((node) => Number.isFinite(node.tmaCm)).map((node) => [node.id, node.tmaCm])) };
+          setHistory((current) => {
+            const matching = current.filter((item) => item.runId === point.runId && item.time < point.time);
+            return [...matching, point].slice(-120);
+          });
+        } else {
+          setHistory([]);
+        }
         if (next.runId && next.status !== 'idle') {
           if (next.status === 'running') setSelectedSpeed(next.speedMultiplier);
           if (next.mode === 'rain_replay' || next.mode === 'synthetic_demo' || next.episodeId) {
@@ -232,24 +188,6 @@ export default function CiliwungSimulationPage({
             if (SCENARIOS.some((scenario) => scenario.id === next.scenario)) setSelectedScenario(next.scenario!);
           }
         }
-        const point: HistoryPoint = {
-          runId: next.runId,
-          time: next.simTimeSeconds,
-          values: Object.fromEntries(next.cupNodes.map((node) => [node.id, node.tmaCm])),
-          rainRatesMmH: Object.fromEntries(next.cupNodes
-            .filter((node) => typeof node.rainRateMmH === 'number' && Number.isFinite(node.rainRateMmH))
-            .map((node) => [node.id, node.rainRateMmH])),
-        };
-        setHistory((current) => {
-          const key = `${next.runId}:${next.simTimeSeconds}`;
-          if (next.status === 'idle') {
-            lastHistoryKey.current = null;
-            return [];
-          }
-          if (lastHistoryKey.current === key) return current;
-          lastHistoryKey.current = key;
-          return [...(current[0]?.runId === next.runId ? current.slice(-119) : []), point];
-        });
       } catch {
         setError('State simulasi dari backend tidak valid.');
       }
@@ -281,63 +219,21 @@ export default function CiliwungSimulationPage({
     fetch(`${apiBase}/api/ciliwung-simulation/history`)
       .then(async (response) => {
         if (!response.ok) throw new Error('simulation_history_unavailable');
-        return response.json() as Promise<{ runId: string; episodeId: string | null; points: HistoryPoint[] }>;
+        return response.json() as Promise<{ runId: string; points: HistoryPoint[] }>;
       })
       .then((payload) => {
         if (!active || payload.runId !== runId || !Array.isArray(payload.points)) return;
-        const valid = payload.points.every((point) => point.runId === runId && Number.isFinite(point.time)
-          && point.values && point.rainRatesMmH);
-        if (!valid) return;
+        const valid = payload.points.filter((point) => point.runId === runId && Number.isFinite(point.time)
+          && point.values && typeof point.values === 'object');
         setHistory((current) => {
-          const matching = current[0]?.runId === runId ? current : [];
-          const byTime = new Map([...payload.points, ...matching].map((point) => [point.time, point]));
+          const live = current.filter((point) => point.runId === runId);
+          const byTime = new Map([...valid, ...live].map((point) => [point.time, point]));
           return [...byTime.values()].sort((a, b) => a.time - b.time).slice(-120);
         });
       })
-      .catch(() => { /* Live SSE still provides history from the connection onward. */ });
+      .catch(() => { /* SSE continues to supply the current run's live points. */ });
     return () => { active = false; };
   }, [apiBase, state?.runId, state?.mode, state?.status]);
-
-  useEffect(() => {
-    if (selectedMode !== 'legacy' || !FORECAST_NODES.has(graphNodeId)) {
-      setScenarioPreviews(null);
-      setScenarioPreviewError(null);
-      setScenarioPreviewLoading(false);
-      return;
-    }
-    let active = true;
-    setScenarioPreviews(null);
-    setScenarioPreviewError(null);
-    setScenarioPreviewLoading(true);
-    fetch(`${apiBase}/api/ciliwung-simulation/scenario-previews?nodeId=${encodeURIComponent(graphNodeId)}`)
-      .then(async (response) => {
-        if (!response.ok) throw new Error('scenario_preview_unavailable');
-        return response.json() as Promise<ScenarioPreviewResponse>;
-      })
-      .then((payload) => {
-        const expected = SCENARIOS.map((scenario) => scenario.id);
-        const valid = payload?.nodeId === graphNodeId && Array.isArray(payload.previews)
-          && payload.previews.length === expected.length
-          && expected.every((scenarioId) => {
-            const item = payload.previews.find((preview) => preview.scenarioId === scenarioId);
-            return item && (!item.nodeId || item.nodeId === graphNodeId)
-              && Number.isFinite(item.currentSyntheticTmaCm)
-              && Number.isFinite(item.predictedTmaCm?.['30'])
-              && Number.isFinite(item.predictedTmaCm?.['60'])
-              && item.trajectoryCm?.length === 12 && item.trajectoryCm.every(Number.isFinite)
-              && typeof item.method === 'string' && typeof item.modelVersion === 'string';
-          });
-        if (!valid) throw new Error('invalid_scenario_preview');
-        if (active) setScenarioPreviews(payload);
-      })
-      .catch((previewError) => {
-        if (active) setScenarioPreviewError(previewError instanceof Error ? previewError.message : 'scenario_preview_unavailable');
-      })
-      .finally(() => {
-        if (active) setScenarioPreviewLoading(false);
-      });
-    return () => { active = false; };
-  }, [apiBase, selectedMode, graphNodeId]);
 
   useEffect(() => {
     const replay = state?.mode === 'rain_replay' || state?.mode === 'synthetic_demo' || Boolean(state?.episodeId);
@@ -362,13 +258,19 @@ export default function CiliwungSimulationPage({
     return () => { active = false; };
   }, [apiBase, state?.runId, state?.mode, state?.episodeId, state?.status, graphNodeId]);
 
+  const availableNodes = state?.cupNodes ?? [];
+  useEffect(() => {
+    if (availableNodes.length && !availableNodes.some((node) => node.id === graphNodeId)) {
+      setGraphNodeId(availableNodes[0].id);
+    }
+  }, [state?.cupNodes, graphNodeId]);
+
   const selectedProfile = SCENARIOS.find((scenario) => scenario.id === selectedScenario) ?? SCENARIOS[0];
   const isRunning = state?.status === 'running';
   const isReplay = state?.mode === 'rain_replay' || state?.mode === 'synthetic_demo' || Boolean(state?.episodeId);
-  const currentNode = state?.cupNodes.find((node) => node.id === graphNodeId);
   const candidateForecast = forecasts[graphNodeId];
   const selectedForecast = isReplay && isRunning && candidateForecast?.runId === state?.runId
-    && candidateForecast.issuedAt === state?.timestampUtc ? candidateForecast : null;
+    && (candidateForecast.issuedAt === state?.timestampUtc || (candidateForecast.status === 'unavailable' && !candidateForecast.issuedAt)) ? candidateForecast : null;
   const thresholdCompatible = selectedForecast?.thresholdBanjirCm === null
     ? graphNodeId === 'UP1' && ([30, 60] as const).every((minutes) => selectedForecast.crossingWithin?.[minutes] === null)
     : graphNodeId !== 'UP1' && Number.isFinite(selectedForecast?.thresholdBanjirCm)
@@ -379,62 +281,81 @@ export default function CiliwungSimulationPage({
     && selectedForecast.trajectoryCm?.length === 12
     && selectedForecast.trajectoryCm.every(Number.isFinite)
     && thresholdCompatible;
-  const alreadyFlooded = forecastAvailable && currentNode != null && Number.isFinite(selectedForecast.thresholdBanjirCm)
-    && currentNode.tmaCm >= (selectedForecast.thresholdBanjirCm as number);
   const cupCarbonActive = state?.cupcarbon?.status === 'active';
   const cupCarbonNodeCount = state?.cupcarbon?.activeNodeCount ?? 0;
-  const scenarioPreviewItems = selectedMode === 'legacy' && !isReplay && scenarioPreviews?.nodeId === graphNodeId
-    ? scenarioPreviews.previews : [];
-  const scenarioPreviewAvailable = scenarioPreviewItems.length === SCENARIOS.length;
-  const previewUsesLstm = scenarioPreviewAvailable && scenarioPreviewItems.every((preview) => preview.method.startsWith('lstm_'));
-  const baseline: HistoryPoint | null = state ? {
-    runId: state.runId,
-    time: state.simTimeSeconds,
-    values: Object.fromEntries(state.cupNodes.map((node) => [node.id, node.tmaCm])),
-    rainRatesMmH: Object.fromEntries(state.cupNodes
-      .filter((node) => typeof node.rainRateMmH === 'number' && Number.isFinite(node.rainRateMmH))
-      .map((node) => [node.id, node.rainRateMmH])),
-  } : null;
-  const graphHistory = history.length > 0 && history[0].runId === state?.runId ? history : baseline ? [baseline] : [];
-  const previewLevels = scenarioPreviewAvailable ? scenarioPreviewItems.flatMap((preview) => [preview.currentSyntheticTmaCm, ...preview.trajectoryCm]) : [];
-  const graphMax = Math.max(300, ...graphHistory.map((point) => point.values[graphNodeId] ?? 0),
-    ...(forecastAvailable ? selectedForecast.trajectoryCm! : []), ...previewLevels,
-    forecastAvailable && Number.isFinite(selectedForecast.thresholdBanjirCm) ? selectedForecast.thresholdBanjirCm! : 0);
-  const hasProjection = forecastAvailable || scenarioPreviewAvailable;
-  const pastRight = hasProjection ? 520 : 790;
-  const graphX = (index: number) => graphHistory.length <= 1 ? pastRight : (index / (graphHistory.length - 1)) * (pastRight - 10) + 10;
-  const graphY = (level: number) => 220 - (level / graphMax) * 200;
-  const graphPoints = graphHistory.map((point, index) =>
-    `${graphX(index).toFixed(1)},${graphY(point.values[graphNodeId] ?? 0).toFixed(1)}`).join(' ');
-  const rainValues = graphHistory.map((point) => point.rainRatesMmH[graphNodeId]).filter(Number.isFinite);
-  const rainMax = Math.max(1, ...rainValues);
-  const rainSegments: string[] = [];
-  let rainSegment: string[] = [];
-  graphHistory.forEach((point, index) => {
-    const value = point.rainRatesMmH[graphNodeId];
-    if (Number.isFinite(value)) {
-      // Reserve a visible lower band for the independent rainfall scale. A dry
-      // 0 mm/h line must not disappear underneath the water-level x-axis.
-      rainSegment.push(`${graphX(index).toFixed(1)},${(204 - (value / rainMax) * 72).toFixed(1)}`);
-    } else if (rainSegment.length) {
-      rainSegments.push(rainSegment.join(' '));
-      rainSegment = [];
-    }
-  });
-  if (rainSegment.length) rainSegments.push(rainSegment.join(' '));
-  const projectedPoints = forecastAvailable && graphHistory.length ? [
-    `${pastRight.toFixed(1)},${graphY(graphHistory[graphHistory.length - 1].values[graphNodeId] ?? 0).toFixed(1)}`,
-    ...selectedForecast.trajectoryCm!.map((level, index) =>
-      `${(pastRight + (index + 1) * (790 - pastRight) / 12).toFixed(1)},${graphY(level).toFixed(1)}`),
-  ].join(' ') : '';
-  const scenarioProjectedPoints = scenarioPreviewAvailable ? scenarioPreviewItems.map((preview) => ({
-    preview,
-    points: [
-      `${pastRight.toFixed(1)},${graphY(preview.currentSyntheticTmaCm).toFixed(1)}`,
-      ...preview.trajectoryCm.map((level, index) =>
-        `${(pastRight + (index + 1) * (790 - pastRight) / 12).toFixed(1)},${graphY(level).toFixed(1)}`),
-    ].join(' '),
-  })) : [];
+  const currentNode = availableNodes.find((node) => node.id === graphNodeId);
+  const currentTime = state?.simTimeSeconds ?? 0;
+  const projectionOffset = legacyProjection ? currentTime - legacyProjection.issuedSimTimeSeconds : -1;
+  const projectionPoint = isRunning && !isReplay && legacyProjection?.runId === state?.runId
+    && legacyProjection.nodeId === graphNodeId && legacyProjection.speedMultiplier === state?.speedMultiplier
+    ? legacyProjection.points.find((point) => Math.abs(point.afterSeconds - projectionOffset) < 0.001
+      && Number.isFinite(currentNode?.tmaCm) && Math.abs(point.tmaCm - currentNode!.tmaCm) < 0.011) : undefined;
+
+  const projectionRemaining = legacyProjection
+    ? legacyProjection.points[legacyProjection.points.length - 1].afterSeconds - projectionOffset : 0;
+  const projectionHasFuture = Boolean(projectionPoint && legacyProjection && projectionRemaining > 0
+    && (projectionRemaining >= 1800 || legacyProjection.scenarioCompletes));
+  useEffect(() => {
+    if (activeView !== 'graph' || !isRunning || isReplay || !state?.runId || !currentNode
+      || projectionHasFuture || projectionRequestRef.current) return;
+    const requestId = Symbol('projection_request');
+    projectionRequestRef.current = requestId;
+    setProjectionError(false);
+    fetch(`${apiBase}/api/ciliwung-simulation/projection?nodeId=${encodeURIComponent(graphNodeId)}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error('projection_unavailable');
+        return response.json() as Promise<LegacyProjection>;
+      })
+      .then((result) => {
+        if (projectionRequestRef.current !== requestId) return;
+        projectionRequestRef.current = null;
+        if (result?.status !== 'available' || result.method !== 'legacy_simulation_projection'
+          || result.runId !== state.runId || result.nodeId !== graphNodeId
+          || !Number.isFinite(result.issuedSimTimeSeconds) || !Array.isArray(result.points)
+          || result.points.length < 2 || !result.points.every((point, index) =>
+            Number.isFinite(point.afterSeconds) && Number.isFinite(point.tmaCm) && point.tmaCm >= 0
+            && (index === 0 ? point.afterSeconds === 0 : point.afterSeconds > result.points[index - 1].afterSeconds))) {
+          setProjectionError(true);
+          return;
+        }
+        setLegacyProjection(result);
+      })
+      .catch(() => {
+        if (projectionRequestRef.current === requestId) {
+          projectionRequestRef.current = null;
+          setProjectionError(true);
+        }
+      });
+  }, [activeView, apiBase, graphNodeId, isReplay, isRunning, state?.runId, state?.simTimeSeconds, state?.speedMultiplier, legacyProjection, projectionHasFuture]);
+  const currentLevel = state?.runId && state.status !== 'idle' && currentNode && Number.isFinite(currentNode.tmaCm)
+    ? currentNode.tmaCm : null;
+  const currentHistory = currentLevel === null ? [] : [
+    ...history.filter((point) => point.runId === state?.runId && point.time < currentTime
+      && point.time >= currentTime - 1800 && Number.isFinite(point.values[graphNodeId])),
+    { runId: state!.runId!, time: currentTime, values: { [graphNodeId]: currentLevel } },
+  ];
+  const projectedFuture = projectionHasFuture && legacyProjection ? legacyProjection.points
+    .filter((point) => point.afterSeconds > projectionOffset && point.afterSeconds - projectionOffset <= 1800)
+    .filter((point, index, points) => index === points.length - 1 || index === 0
+      || Math.floor((point.afterSeconds - projectionOffset) / 30) > Math.floor((points[index - 1].afterSeconds - projectionOffset) / 30))
+    .map((point) => ({ afterSeconds: point.afterSeconds - projectionOffset, tmaCm: point.tmaCm })) : [];
+  const prediction = forecastAvailable && currentLevel !== null
+    ? selectedForecast.trajectoryCm!.slice(0, 6).map((tmaCm, index) => ({ afterSeconds: (index + 1) * 300, tmaCm }))
+    : projectedFuture;
+  const projectionEndsEarly = Boolean(projectionPoint && legacyProjection?.scenarioCompletes && prediction.length
+    && prediction[prediction.length - 1].afterSeconds < 1800);
+  const graphLevels = [...currentHistory.map((point) => point.values[graphNodeId]), ...prediction.map((point) => point.tmaCm)];
+  // The reference is generated from all legacy scenarios, not a live prediction.
+  const reference = (graphScale.maxTmaCmByNode as Record<string, number>)[graphNodeId];
+  const graphMax = Math.max(20, Math.ceil((Math.max(Number.isFinite(reference) ? reference : 0, 0, ...graphLevels) * 1.1 - 1e-9) / 20) * 20);
+  const graphY = (level: number) => 190 - (level / graphMax) * 180;
+  const livePoints = currentHistory.map((point) => ({
+    x: 360 - (currentTime - point.time) / 1800 * 352, y: graphY(point.values[graphNodeId]),
+  }));
+  const predictedPoints = prediction.length && currentLevel !== null ? [
+    { x: 360, y: graphY(currentLevel) },
+    ...prediction.map((point) => ({ x: 360 + point.afterSeconds * 352 / 1800, y: graphY(point.tmaCm) })),
+  ] : [];
 
   async function request(path: string, body?: Record<string, unknown>) {
     setBusy(true);
@@ -458,8 +379,6 @@ export default function CiliwungSimulationPage({
   }
 
   async function handleStart() {
-    lastHistoryKey.current = null;
-    setHistory([]);
     if (selectedMode === 'rain_replay') {
       if (!selectedEpisodeId) return;
       await request('/api/ciliwung-simulation/replay/start', { episodeId: selectedEpisodeId, speedMultiplier: selectedSpeed });
@@ -482,8 +401,6 @@ export default function CiliwungSimulationPage({
   }
 
   async function handleReset() {
-    lastHistoryKey.current = null;
-    setHistory([]);
     const payload = await request('/api/ciliwung-simulation/reset');
     if (payload) {
       setSelectedSpeed(1);
@@ -560,7 +477,7 @@ export default function CiliwungSimulationPage({
             </div>
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div><span className="block text-[10px] text-slate-500 uppercase">Time</span><strong>{formatTime(state?.simTimeSeconds ?? 0)}</strong></div>
-              <div><span className="block text-[10px] text-slate-500 uppercase">Target</span><strong>{state?.targetNodeId ?? '—'}</strong></div>
+              <div><span className="block text-[10px] text-slate-500 uppercase">Target</span><strong>{state?.cupNodes.find((node) => node.id === state.targetNodeId)?.name ?? '—'}</strong></div>
             </div>
             <div className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2">
               <div>
@@ -598,192 +515,102 @@ export default function CiliwungSimulationPage({
         {state?.cupcarbon?.warning && !cupCarbonActive && <div className={`mt-4 rounded-xl border p-3 text-xs ${isDark ? 'border-amber-500/20 bg-amber-500/10 text-amber-200' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>CupCarbon: {state.cupcarbon.warning}</div>}
       </section>
 
-      <div className="flex gap-2">
-        <button type="button" onClick={() => setActiveView('simulation')} className={`px-4 py-2 rounded-xl text-xs font-bold cursor-pointer ${activeView === 'simulation' ? 'bg-[#3B82F6] text-black' : isDark ? 'bg-white/5 text-slate-400' : 'bg-slate-100 text-slate-500'}`}>View Simulation</button>
-        <button type="button" onClick={() => setActiveView('map2d')} className={`px-4 py-2 rounded-xl text-xs font-bold cursor-pointer ${activeView === 'map2d' ? 'bg-[#3B82F6] text-black' : isDark ? 'bg-white/5 text-slate-400' : 'bg-slate-100 text-slate-500'}`}>View 2D Map</button>
-        <button type="button" onClick={() => setActiveView('graph')} className={`px-4 py-2 rounded-xl text-xs font-bold cursor-pointer ${activeView === 'graph' ? 'bg-[#3B82F6] text-black' : isDark ? 'bg-white/5 text-slate-400' : 'bg-slate-100 text-slate-500'}`}>View Graph</button>
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,2fr)_minmax(260px,1fr)] gap-5 items-stretch">
+        <div className="min-w-0 flex flex-col gap-4">
+      <div className="flex flex-wrap gap-2" role="group" aria-label={language === 'en' ? 'Simulation viewer' : 'Tampilan simulasi'}>
+        {([
+          ['map2d', language === 'en' ? '2D Map' : 'Peta 2D'],
+          ['map3d', language === 'en' ? '3D Map' : 'Peta 3D'],
+          ['graph', language === 'en' ? 'Forecast Graph' : 'Grafik Prediksi'],
+        ] as const).map(([view, label]) => (
+          <button key={view} type="button" aria-pressed={activeView === view} onClick={() => setActiveView(view)} className={`px-4 py-2 rounded-xl text-xs font-bold cursor-pointer ${activeView === view ? 'bg-[#3B82F6] text-black' : isDark ? 'bg-white/5 text-slate-400' : 'bg-slate-100 text-slate-500'}`}>{label}</button>
+        ))}
       </div>
 
-      <section data-testid="bmkg-weather-context" className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} rounded-2xl border p-5`}>
-        <h2 className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>Live weather context · {weatherContext?.source || 'BMKG unavailable'}</h2>
-        {weatherContext?.status === 'available' ? (
-          <div className="text-xs text-slate-400 mt-2 space-y-1">
-            <p>{weatherContext.location?.desa || 'Area not confirmed'}{weatherContext.location?.kecamatan ? `, ${weatherContext.location.kecamatan}` : ''} · {weatherContext.weatherDesc || 'Condition not supplied'}</p>
-            <p>Forecast issued {formatWib(weatherContext.issuedAt || undefined)} · valid {formatWib(weatherContext.validFrom || undefined)} to {formatWib(weatherContext.validTo || undefined)}</p>
-            <p>Fetched {formatWib(weatherContext.acquiredAt || undefined)} · source {weatherContext.source} ({weatherContext.kind})</p>
-          </div>
-        ) : (
-          <p className="text-xs text-amber-400 mt-2">Live weather context unavailable: {weatherContext?.reason || 'loading'}.</p>
-        )}
-        <p className="text-[11px] text-slate-500 mt-3">Forecast context, not observed 5-minute rainfall and not an LSTM input in this synthetic replay. The rain and TMA traces below are synthetic.</p>
-      </section>
-
-      <section data-testid="ciliwung-forecast" className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} rounded-2xl border p-5 lg:p-7`}>
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <span className="text-[10px] font-mono font-bold tracking-widest text-blue-400">{isReplay && isRunning ? 'SYNTHETIC DEMO · MODEL FORECAST' : selectedMode === 'legacy' ? (scenarioPreviewAvailable ? 'SYNTHETIC V2 · COUNTERFACTUAL SCENARIO ESTIMATES' : 'LEGACY MODE · NO LIVE FORECAST') : 'FORECAST OFF · NO ACTIVE REPLAY'}</span>
-            <h2 className={`text-lg font-bold mt-1 ${isDark ? 'text-white' : 'text-slate-900'}`}>Separate predicted TMA · {graphNodeId}</h2>
-            <p className="text-xs text-slate-400 mt-1">Current {graphNodeId}: {currentNode ? `${currentNode.tmaCm.toFixed(1)} cm · ${statusLabel(currentNode.status)}` : '—'} (state, not prediction)</p>
-          </div>
-          <select aria-label="Forecast node" value={graphNodeId} onChange={(event) => setGraphNodeId(event.target.value)} className={`rounded-lg border px-3 py-2 text-xs ${isDark ? 'bg-black/30 border-white/10 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}>
-            {MAIN_GRAPH_NODES.map((nodeId) => <option key={nodeId} value={nodeId}>{nodeId}</option>)}
-          </select>
-        </div>
-        <p className="text-xs text-slate-400 mt-3">
-          {isReplay ? `Episode ${state?.episodeId ?? '—'} · simulation clock · synthetic rain and TMA (not observed 5-minute BMKG data)` : 'Legacy cm/s scenario has no live LSTM forecast; counterfactual synthetic-v2 estimates are shown separately in the TMA graph.'}
-        </p>
-        {forecastAvailable ? (
-          <>
-            <div className="text-xs text-slate-400 mt-3 space-y-1">
-              <p>Issued {formatWib(selectedForecast.issuedAt)} (simulation time) · Generated {formatWib(selectedForecast.generatedAt)} (wall time)</p>
-              <p>Method {selectedForecast.method || '—'} · version {selectedForecast.modelVersion || '—'} · quality {selectedForecast.quality || 'experimental_synthetic_only'}</p>
-              {selectedForecast.thresholdBanjirCm === null
-                ? <p>No flood threshold defined for {graphNodeId}; +30/+60 levels only.</p>
-                : <p>Demo flood threshold {selectedForecast.thresholdBanjirCm ?? '—'} cm · {alreadyFlooded ? 'flood threshold already reached' : 'current stage below flood threshold'}</p>}
-              {selectedForecast.inputProvenance?.upstreamFeature === 'self_proxy_no_upstream_gauge'
-                && <p>Upstream input: self-proxy at headwater (no upstream gauge).</p>}
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
-              {([30, 60] as const).map((minutes) => {
-                const key = String(minutes) as '30' | '60';
-                return (
-                  <div key={key} data-testid={`forecast-${key}`} className={`${isDark ? 'bg-indigo-500/10 border-indigo-500/25' : 'bg-indigo-50 border-indigo-200'} rounded-xl border p-4`}>
-                    <span className="block text-xs font-bold">+{minutes} min predicted TMA</span>
-                    <strong className="block text-2xl mt-2">{selectedForecast.predictedTmaCm![key].toFixed(1)} cm</strong>
-                    <span className="block text-[11px] text-slate-400 mt-1">Valid {formatWib(selectedForecast.issuedAt, minutes)}</span>
-                    <span className={`block text-xs font-bold mt-3 ${selectedForecast.thresholdBanjirCm === null ? 'text-slate-400' : selectedForecast.crossingWithin![key] ? 'text-rose-400' : 'text-emerald-400'}`}>
-                      {selectedForecast.thresholdBanjirCm === null ? 'Flood crossing not evaluated (no flood threshold defined)'
-                        : alreadyFlooded ? 'flood threshold already reached'
-                          : selectedForecast.crossingWithin![key] ? `threshold crossing within ${minutes} min` : 'threshold crossing not indicated'}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </>
-        ) : (
-          <div role="status" className={`${isDark ? 'bg-amber-500/10 border-amber-500/25 text-amber-200' : 'bg-amber-50 border-amber-200 text-amber-700'} rounded-xl border p-4 mt-4 text-xs`}>
-            {selectedMode === 'legacy'
-              ? scenarioPreviewAvailable ? 'No live forecast is attached to the legacy cm/s state; synthetic-v2 scenario estimates are shown separately below.'
-                : scenarioPreviewLoading ? 'Legacy cm/s mode has no live forecast; synthetic scenario estimates are loading below.'
-                  : scenarioPreviewError ? `Legacy mode has no live forecast; synthetic scenario preview unavailable: ${scenarioPreviewError}.`
-                    : 'Legacy cm/s mode has no live forecast; counterfactual estimates are separate from current state.'
-              : `Forecast unavailable: ${selectedForecast?.reason || (isReplay && !FORECAST_NODES.has(graphNodeId) ? 'unmapped_station' : isReplay && isRunning ? 'awaiting forecast or insufficient history' : 'no active synthetic replay')}.`}          </div>
-        )}
-        <p className="text-[11px] text-slate-500 mt-4">Experimental synthetic-data forecast; not validated for operational flood warning. No calibrated probability is provided.</p>
-      </section>
-
       {activeView === 'map2d' ? (
-        <Map2D simulation extraNodes={SIMULATION_UPSTREAM} fallbackLevel={null} config={{}} snapshot={state ? {
+        <Map2D compact fillHeight simulation extraNodes={SIMULATION_UPSTREAM} fallbackLevel={null} config={{}} snapshot={state ? {
           mode: 'hardware', runId: state.runId, status: state.runId && state.status !== 'idle' ? 'running' : 'idle',
           timestampUtc: state.timestampUtc,
           hardware: { nodeId: 'N1', tmaCm: state.threeDNodes.find((node) => node.id === 'N1')?.tmaCm, freshness: state.runId && state.status !== 'idle' ? 'live' : 'stale', condition: state.scenario },
           threeDNodes: state.threeDNodes.map((node) => ({ ...node, valueType: 'simulation' as const, source: 'simulation' })),
           cupNodes: [],
         } : null} />
-      ) : activeView === 'simulation' ? (
-        <section className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} rounded-2xl border p-3 lg:p-5`}>
+      ) : activeView === 'map3d' ? (
+        <section className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} rounded-2xl border p-3 lg:p-5 flex flex-1 flex-col`}>
           <div className={`flex items-center justify-between px-2 pb-3 text-[10px] font-mono uppercase tracking-widest ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
             <span>3D Ciliwung Renderer</span>
             <span>Backend mode · localhost:8765</span>
           </div>
-          <iframe title="Ciliwung 3D simulation" src={threeDUrl} className="w-full min-h-[680px] rounded-xl border border-white/10 bg-black" />
+          <iframe title="Ciliwung 3D simulation" src={threeDUrl} className="w-full h-[clamp(360px,65vh,760px)] lg:h-auto lg:flex-1 min-h-[360px] rounded-xl border border-white/10 bg-black" />
         </section>
       ) : (
-        <section className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} rounded-2xl border p-5 lg:p-7`}>
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
+        <section data-testid="forecast-graph" className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} rounded-2xl border p-5 sm:p-7 flex flex-1 flex-col`}>
+          <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h2 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{isReplay ? 'Synthetic rain replay' : selectedProfile.label} · TMA Graph</h2>
-              <p className={`text-xs mt-1 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>Node {graphNodeId} · Simulation time {formatTime(state?.simTimeSeconds ?? 0)} · {isReplay ? `${graphHistory.length} past five-minute bins from backend replay plus live updates; not Firestore.` : `${graphHistory.length} buffered legacy state samples; this mode has no rainfall series.`}</p>
+              <p className="text-xs font-semibold text-blue-400">{language === 'en' ? 'WATER LEVEL FORECAST' : 'PREDIKSI TINGGI AIR'}</p>
+              <h2 className={`mt-1 text-xl font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{currentNode ? currentNode.name : (language === 'en' ? 'Waiting for node' : 'Menunggu node')}</h2>
+              <p className={`mt-1 text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                {isReplay ? (language === 'en' ? 'Synthetic replay forecast' : 'Prediksi replay sintetis') : selectedMode === 'legacy'
+                  ? `${language === 'en' ? 'Legacy simulation' : 'Simulasi legacy'} · ${selectedProfile.label}`
+                  : (language === 'en' ? 'Synthetic replay' : 'Replay sintetis')}
+              </p>
             </div>
-            <select value={graphNodeId} onChange={(event) => setGraphNodeId(event.target.value)} className={`rounded-lg border px-3 py-2 text-xs ${isDark ? 'bg-black/30 border-white/10 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}>
-              {MAIN_GRAPH_NODES.map((nodeId) => <option key={nodeId} value={nodeId}>{nodeId}</option>)}
-            </select>
+            <span className={`rounded-full px-3 py-1 text-xs font-medium ${isDark ? 'bg-blue-500/10 text-blue-300' : 'bg-blue-50 text-blue-700'}`}>{prediction.length && Math.abs(prediction[prediction.length - 1].afterSeconds - 1800) < 0.001 ? `${language === 'en' ? 'Estimate' : 'Estimasi'} +30 ${language === 'en' ? 'min' : 'menit'} · ${prediction[prediction.length - 1].tmaCm.toFixed(1)} cm` : 'cm'}</span>
           </div>
-          <div className={`rounded-xl border p-3 ${isDark ? 'border-white/10 bg-black/20' : 'border-slate-200 bg-slate-50'}`}>
-            <div className="flex flex-wrap gap-4 mb-2 text-[11px] text-slate-400">
-              {isReplay ? <span>Rain (synthetic, mm/h) · right scale 0–{rainMax.toFixed(1)}</span> : <span>Rainfall trace unavailable in legacy cm/s scenario (not assumed dry)</span>}
-              <span>Current TMA (cm) · solid blue</span>
-              {forecastAvailable && <span>Replay forecast · dashed indigo, +5 to +60 simulated min</span>}
-              {scenarioPreviewAvailable && <span>Counterfactual synthetic-v2 scenario estimates · separate from current state</span>}
-              {scenarioPreviewAvailable && scenarioPreviewItems.map((preview) => <span key={preview.scenarioId} style={{ color: SCENARIO_COLORS[preview.scenarioId] }}>{preview.label} · dashed</span>)}
-              {isReplay && rainSegments.length === 0 && <span>Rain unavailable (not assumed dry)</span>}
+
+          {graphLevels.length ? (
+            <div className="mt-7 flex flex-1 flex-col justify-center" role="img" aria-label={`${language === 'en' ? 'Water level forecast' : 'Grafik prediksi tinggi air'} ${currentNode?.name ?? ''}`}>
+              <div className="flex gap-3">
+                <div aria-hidden="true" className="flex h-56 sm:h-72 flex-col justify-between py-2 text-right text-xs text-slate-500">
+                  {[4, 3, 2, 1, 0].map((step) => <span key={step}>{graphMax * step / 4}</span>)}
+                </div>
+                <svg viewBox="0 0 720 200" className="min-w-0 flex-1 h-56 sm:h-72" preserveAspectRatio="none" aria-hidden="true">
+                  <defs><linearGradient id="simulation-graph-area" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity=".15" /><stop offset="95%" stopColor="#3B82F6" stopOpacity="0" /></linearGradient></defs>
+                  {[10, 55, 100, 145, 190].map((y) => <line key={y} x1="8" y1={y} x2="712" y2={y} stroke="currentColor" strokeDasharray="3 3" opacity=".18" />)}
+                  {[8, 184, 360, 536, 712].map((x) => <line key={x} x1={x} y1="10" x2={x} y2="190" stroke="currentColor" strokeDasharray="3 3" opacity=".18" />)}
+                  {currentHistory.length > 1 && <><Curve type="monotoneX" points={livePoints} baseLine={190} fill="url(#simulation-graph-area)" stroke="none" /><Curve data-testid="current-tma-trace" type="monotoneX" points={livePoints}
+                    fill="none" stroke="#3B82F6" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" /></>}
+                  {currentLevel !== null && <circle data-testid="current-tma-point" cx="360" cy={graphY(currentLevel)} r="4" fill="#3B82F6" />}
+                  {predictedPoints.length > 0 && <Curve data-testid="forecast-tma-trace" type="monotoneX" points={predictedPoints} fill="none" stroke="#a78bfa" strokeWidth="2.5" strokeDasharray="1 7" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />}
+                  {prediction.length > 0 && <circle cx={360 + prediction[prediction.length - 1].afterSeconds * 352 / 1800} cy={graphY(prediction[prediction.length - 1].tmaCm)} r="3" fill="#a78bfa" />}
+                </svg>
+              </div>
+              <div className="ml-9 flex justify-between gap-2 text-xs text-slate-500"><span>−30 {language === 'en' ? 'min' : 'menit'}</span><span>{language === 'en' ? 'Now' : 'Saat ini'} · {formatTime(currentTime)}</span><span>+30 {language === 'en' ? 'min' : 'menit'}</span></div>
+              <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400"><span><span className="text-blue-400">━━</span> {language === 'en' ? 'Simulation state' : 'Kondisi simulasi'}</span><span><span className="text-violet-400">┄┄</span> {language === 'en' ? 'Forecast' : 'Prediksi'}</span><span>{language === 'en' ? 'Simulation time (mm:ss)' : 'Waktu simulasi (mm:ss)'}</span></div>
             </div>
-            <svg viewBox="0 0 800 240" className="w-full h-64" role="img" aria-label={`Grafik TMA ${graphNodeId}`}>
-              {Array.from({ length: 5 }, (_, index) => {
-                const y = 220 - index * 50;
-                const level = Math.round(graphMax * index / 4);
-                return <g key={index}>
-                  <line x1="10" y1={y} x2="790" y2={y} stroke="currentColor" opacity={index === 0 ? '.3' : '.12'} />
-                  <text x="7" y={y - 3} textAnchor="end" fill="currentColor" opacity=".55" fontSize="9">{level}</text>
-                </g>;
-              })}
-              <line x1="10" y1="20" x2="10" y2="220" stroke="currentColor" opacity=".25" />
-              {hasProjection && <line x1={pastRight} y1="20" x2={pastRight} y2="220" stroke="currentColor" strokeDasharray="3 5" opacity=".18" />}
-              {forecastAvailable && Number.isFinite(selectedForecast.thresholdBanjirCm) && <line x1="10" y1={graphY(selectedForecast.thresholdBanjirCm!)} x2="790" y2={graphY(selectedForecast.thresholdBanjirCm!)} stroke="#f43f5e" strokeDasharray="6 5" opacity=".6" />}
-              {rainSegments.map((points, index) => <polyline key={index} data-testid="synthetic-rain-trace" points={points} fill="none" stroke="#38bdf8" strokeWidth="2" strokeDasharray="3 3" />)}
-              {graphPoints && <polyline data-testid="current-tma-trace" points={graphPoints} fill="none" stroke="#3B82F6" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />}
-              {projectedPoints && <polyline data-testid="forecast-tma-trace" points={projectedPoints} fill="none" stroke="#a78bfa" strokeWidth="2.5" strokeDasharray="7 5" strokeLinejoin="round" />}
-              {scenarioProjectedPoints.map(({ preview, points }) => <polyline key={preview.scenarioId}
-                data-testid="scenario-preview-trace" data-scenario={preview.scenarioId} points={points} fill="none"
-                stroke={SCENARIO_COLORS[preview.scenarioId]} strokeWidth={preview.scenarioId === selectedScenario ? 3 : 1.8}
-                strokeDasharray={preview.scenarioId === selectedScenario ? '7 5' : '4 5'}
-                strokeOpacity={preview.scenarioId === selectedScenario ? '.98' : '.62'} strokeLinejoin="round" />)}
-              {graphHistory.length === 1 && graphPoints && <circle cx={pastRight} cy={graphY(graphHistory[0].values[graphNodeId] ?? 0)} r="5" fill="#3B82F6" />}
-              {!graphPoints && <text x="400" y="125" textAnchor="middle" fill="currentColor" opacity=".5" fontSize="14">Menunggu state backend...</text>}
-            </svg>
-            <div className="flex justify-between text-[10px] text-slate-500"><span>Past state · {formatTime(graphHistory[0]?.time ?? 0)}</span><span>{forecastAvailable ? '+60 simulated min (forecast)' : scenarioPreviewAvailable ? '+60 min (synthetic scenario estimate)' : `Latest · ${formatTime(state?.simTimeSeconds ?? 0)}`}</span></div>
-          </div>
-          {scenarioPreviewLoading && selectedMode === 'legacy' && <p role="status" className="mt-4 text-xs text-slate-400">Calculating three synthetic rainfall scenario estimates with the selected node model…</p>}
-          {scenarioPreviewError && selectedMode === 'legacy' && <p role="status" className="mt-4 text-xs text-amber-300">Scenario estimates unavailable: {scenarioPreviewError}</p>}
-          {scenarioPreviewAvailable && (
-            <section data-testid="scenario-lstm-estimates" className={`mt-5 rounded-xl border p-4 ${isDark ? 'border-indigo-500/25 bg-indigo-500/5' : 'border-indigo-200 bg-indigo-50/60'}`}>
-              <div className="mb-3">
-                <h3 className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{previewUsesLstm ? 'LSTM scenario estimates' : 'Scenario model estimates'} · {graphNodeId}</h3>
-                <p className="mt-1 text-[11px] text-slate-400">Synthetic v2 · 96 five-minute input bins · +30/+60 min estimates. Counterfactual only, separate from current legacy run and not validated for flood warning.</p>
-                <p className="mt-1 text-[11px] text-slate-500">Rain totals below are synthetic input assumptions per catchment, not measured rainfall or official BMKG intensity classes. Selected profile: {selectedProfile.label}.</p>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {scenarioPreviewItems.map((preview) => (
-                  <article key={preview.scenarioId} data-testid={`scenario-estimate-${preview.scenarioId}`} className={`rounded-lg border p-3 ${preview.scenarioId === selectedScenario ? (isDark ? 'border-blue-400/60 bg-blue-500/10' : 'border-blue-400 bg-white') : (isDark ? 'border-white/10 bg-black/20' : 'border-slate-200 bg-white/80')}`}>
-                    <div className="flex items-center justify-between gap-2">
-                      <h4 className="text-xs font-bold" style={{ color: SCENARIO_COLORS[preview.scenarioId] }}>{preview.label}</h4>
-                      {preview.scenarioId === selectedScenario && <span className="text-[9px] uppercase tracking-wide text-blue-400">selected</span>}
-                    </div>
-                    <p className="mt-2 text-[10px] text-slate-400">Rain input: {Object.entries(preview.rainfallDepthMmPerCatchment).map(([catchment, depth]) => `${catchment} ${depth} mm`).join(' · ')}</p>
-                    <p className="mt-1 text-[10px] text-slate-500">Synthetic issue TMA: {preview.currentSyntheticTmaCm.toFixed(2)} cm · {preview.method} · {preview.modelVersion}</p>
-                    <div className="grid grid-cols-2 gap-2 mt-3">
-                      <div><span className="block text-[10px] text-slate-500">+30 min</span><strong className="text-base">{preview.predictedTmaCm['30'].toFixed(2)} cm</strong></div>
-                      <div><span className="block text-[10px] text-slate-500">+60 min</span><strong className="text-base">{preview.predictedTmaCm['60'].toFixed(2)} cm</strong></div>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
+          ) : (
+            <div role="status" className={`mt-6 flex min-h-56 items-center justify-center rounded-xl border text-center text-sm ${isDark ? 'border-white/10 text-slate-400' : 'border-slate-200 text-slate-500'}`}>
+              {language === 'en' ? 'Start the simulation to see the graph.' : 'Mulai simulasi untuk melihat grafik.'}
+            </div>
           )}
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-5">
-            {(state?.threeDNodes ?? []).map((node) => (
-              <div key={node.id} className={`${isDark ? 'bg-black/25 border-white/10' : 'bg-slate-50 border-slate-200'} rounded-xl border p-3`}>
-                <div className="flex items-center justify-between gap-2"><strong className="text-xs">{node.id}</strong><span className={`px-2 py-0.5 rounded-full border text-[9px] font-bold ${statusClass(node.status, isDark)}`}>{statusLabel(node.status)}</span></div>
-                <div className="text-lg font-bold mt-2">{node.tmaCm.toFixed(1)} <span className="text-[10px] font-normal text-slate-500">cm</span></div>
-                <div className="text-[10px] text-slate-500">stage +{node.stageRiseM.toFixed(2)} m</div>
-              </div>
-            ))}
-          </div>
+          {currentLevel !== null && prediction.length === 0 && <p role="status" className="mt-3 text-xs text-amber-500">{isReplay
+            ? !isRunning ? (language === 'en' ? 'Replay is not running; forecast unavailable.' : 'Replay berhenti; prediksi tidak tersedia.')
+              : selectedForecast?.reason ? `${language === 'en' ? 'Forecast unavailable' : 'Prediksi tidak tersedia'}: ${selectedForecast.reason}`
+                : (language === 'en' ? 'Waiting for the current forecast…' : 'Menunggu prediksi untuk kondisi saat ini…')
+            : !isRunning ? (language === 'en' ? 'Simulation is not running.' : 'Simulasi tidak berjalan.')
+              : projectionError ? (language === 'en' ? 'Scenario projection unavailable.' : 'Proyeksi skenario tidak tersedia.')
+                : (language === 'en' ? 'Calculating scenario projection…' : 'Menghitung proyeksi skenario…')}</p>}
+          {!isReplay && prediction.length > 0 && <p className="mt-3 text-xs text-slate-500">{language === 'en' ? 'Projection from the current simulation, not an LSTM forecast.' : 'Proyeksi dari simulasi saat ini, bukan prediksi LSTM.'}{projectionEndsEarly && ` ${language === 'en' ? 'Scenario ends at' : 'Skenario selesai pada'} +${formatTime(prediction[prediction.length - 1].afterSeconds)} ${language === 'en' ? '(mm:ss); no later projection.' : '(mm:ss); tidak ada proyeksi setelahnya.'}`}</p>}
+          <p className="mt-3 text-xs text-slate-500">{language === 'en' ? 'Synthetic demonstration; not validated for operational flood warnings.' : 'Demonstrasi sintetis; belum tervalidasi untuk peringatan banjir operasional.'}</p>
         </section>
       )}
-
-      <section className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} rounded-2xl border p-5`}>
-        <div className="flex items-center justify-between mb-4"><h2 className={`font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>Nine-node CupCarbon State</h2><span className="text-[10px] font-mono text-slate-500">local UDP control</span></div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {(state?.cupNodes ?? []).map((node) => (
-            <div key={node.id} className={`${isDark ? 'bg-black/25 border-white/10' : 'bg-slate-50 border-slate-200'} rounded-xl border p-3 flex items-center justify-between gap-3`}>
-              <div><strong className="block text-xs">{node.id} · {node.name}</strong><span className="text-[10px] text-slate-500">CupCarbon node {node.cupcarbonNodeId}</span></div>
-              <div className="text-right"><strong className="block text-sm">{node.tmaCm.toFixed(1)} cm</strong><span className={`text-[9px] font-bold ${node.status === 'BANJIR_JAKARTA' ? 'text-rose-400' : node.status === 'SIAGA' ? 'text-amber-400' : 'text-emerald-400'}`}>{statusLabel(node.status)}</span></div>
-            </div>
-          ))}
         </div>
-      </section>
+        <aside data-testid="simulation-node-levels" className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} rounded-2xl border p-5 flex flex-col gap-3`}>
+          <div><h2 className="text-lg font-bold">{language === 'en' ? 'Water levels' : 'Tinggi Muka Air'}</h2><p className="text-xs opacity-70 mt-1">{language === 'en' ? 'Current simulation state · not sensor readings' : 'Kondisi simulasi saat ini · bukan data sensor'}</p>{activeView === 'graph' && <p className="text-xs text-blue-400 mt-2">{language === 'en' ? 'Select a node to view its forecast' : 'Pilih node untuk melihat grafik'}</p>}</div>
+          <div className="grid grid-cols-1 gap-1.5 content-start">
+          {(state?.cupNodes ?? []).length ? (state?.cupNodes ?? []).map(node => <button key={node.id} type="button" disabled={activeView !== 'graph'}
+            aria-pressed={activeView === 'graph' ? graphNodeId === node.id : undefined}
+            onClick={() => setGraphNodeId(node.id)} data-testid={`simulation-node-${node.id}`}
+            className={`w-full rounded-xl border px-3 py-2 flex items-center justify-between gap-2 text-left transition-colors ${activeView === 'graph' && graphNodeId === node.id ? (isDark ? 'border-blue-400 bg-blue-500/20 ring-1 ring-blue-400/50' : 'border-blue-500 bg-blue-50 ring-1 ring-blue-400') : (isDark ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-200')} ${activeView === 'graph' ? 'cursor-pointer hover:border-blue-400/70' : 'cursor-default'}`}>
+            <span className="min-w-0"><strong className="block text-xs">{node.name}</strong><span className="text-xs opacity-70">{statusLabel(node.status)}</span></span>
+            <strong className="text-sm whitespace-nowrap">{Number.isFinite(node.tmaCm) ? node.tmaCm.toFixed(1) : '—'} cm</strong>
+          </button>) : <p className="text-sm opacity-70">{language === 'en' ? 'Waiting for simulation data' : 'Menunggu data simulasi'}</p>}
+          </div>
+        </aside>
+      </div>
+
+
+
     </div>
   );
 }

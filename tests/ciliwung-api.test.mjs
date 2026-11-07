@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCiliwungEngine } from '../backend/ciliwung/simulation-engine.mjs';
 import { registerCiliwungRoutes } from '../backend/ciliwung/ciliwung-api.mjs';
+import { buildScenarioPreviewHistory } from '../backend/ciliwung/scenario-preview.mjs';
 
 function makeApp() {
   const routes = new Map();
@@ -34,7 +35,7 @@ test('registers the complete Ciliwung REST and SSE contract', () => {
   assert.ok(api.unsubscribe);
   for (const method of ['GET', 'POST']) {
     for (const path of method === 'GET'
-      ? ['/api/ciliwung-simulation/scenarios', '/api/ciliwung-simulation/state', '/api/ciliwung-simulation/history', '/api/ciliwung-simulation/scenario-previews', '/api/ciliwung-simulation/stream']
+      ? ['/api/ciliwung-simulation/scenarios', '/api/ciliwung-simulation/state', '/api/ciliwung-simulation/history', '/api/ciliwung-simulation/projection', '/api/ciliwung-simulation/scenario-previews', '/api/ciliwung-simulation/stream']
       : ['/api/ciliwung-simulation/start', '/api/ciliwung-simulation/stop', '/api/ciliwung-simulation/reset', '/api/ciliwung-simulation/speed']) {
       assert.equal(typeof app.routes.get(`${method} ${path}`), 'function');
     }
@@ -66,9 +67,9 @@ test('speed endpoint updates the authoritative simulation speed', async () => {
   assert.equal(startResponse.body.state.speedMultiplier, 25);
 
   const speedResponse = makeResponse();
-  await app.routes.get('POST /api/ciliwung-simulation/speed')({ body: { speedMultiplier: 50 } }, speedResponse);
+  await app.routes.get('POST /api/ciliwung-simulation/speed')({ body: { speedMultiplier: 150 } }, speedResponse);
   assert.equal(speedResponse.body.success, true);
-  assert.equal(speedResponse.body.state.speedMultiplier, 50);
+  assert.equal(speedResponse.body.state.speedMultiplier, 150);
 });
 
 test('scenario-preview endpoint returns three causal synthetic histories and each node forecast', async () => {
@@ -101,6 +102,11 @@ test('scenario-preview endpoint returns three causal synthetic histories and eac
   assert.equal(response.body.previews[2].rainfallDepthMmPerCatchment.N5, 18);
   assert.equal(response.body.previews[0].predictedTmaCm['30'], 115);
   assert.equal(response.body.previews[2].predictedTmaCm['60'], 141);
+});
+
+test('synthetic scenario preview preserves the dataset reference values for UP3 and UP4', () => {
+  assert.equal(buildScenarioPreviewHistory('ringan', 'UP3').history[0].tmaCm, 100);
+  assert.equal(buildScenarioPreviewHistory('ringan', 'UP4').history[0].tmaCm, 150);
 });
 
 test('scenario-preview endpoint rejects an unmapped station', async () => {
@@ -154,4 +160,36 @@ test('stream sends an initial event and removes the client on close', () => {
   listeners.close();
   engine.start('ringan');
   assert.equal(response.chunks.length, 1);
+});
+
+
+test('legacy projection route is read-only and does not emit forecast or CupCarbon commands', () => {
+  const app = makeApp();
+  const engine = createCiliwungEngine({ autoStart: false });
+  let currentCommands = 0;
+  let forecastCommands = 0;
+  const api = registerCiliwungRoutes(app, { engine,
+    sendCupCarbon: () => { currentCommands += 1; }, sendForecastCupCarbon: () => { forecastCommands += 1; } });
+  const route = app.routes.get('GET /api/ciliwung-simulation/projection');
+  let response = makeResponse();
+  route({ query: { nodeId: 'N1' } }, response);
+  assert.equal(response.body.status, 'unavailable');
+  engine.start('ringan', 10);
+  engine.advance(1);
+  const state = engine.getState();
+  const before = [currentCommands, forecastCommands];
+  response = makeResponse();
+  route({ query: { nodeId: 'N1' } }, response);
+  assert.equal(response.body.status, 'available');
+  assert.equal(response.body.points[0].tmaCm, state.cupNodes.find(node => node.id === 'N1').tmaCm);
+  assert.deepEqual(engine.getState(), state);
+  assert.deepEqual([currentCommands, forecastCommands], before);
+  response = makeResponse();
+  route({ query: { nodeId: 'UNKNOWN' } }, response);
+  assert.equal(response.statusCode, 400);
+  engine.stop();
+  response = makeResponse();
+  route({ query: { nodeId: 'N1' } }, response);
+  assert.equal(response.body.status, 'unavailable');
+  api.unsubscribe();
 });

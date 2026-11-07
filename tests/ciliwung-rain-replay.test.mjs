@@ -92,6 +92,19 @@ test('a noisy replay level below baseline preserves current TMA but never sends 
   assert.equal(n1.stageRiseM, 0);
 });
 
+test('synthetic replay retains its original UP3 and UP4 visual reference levels', () => {
+  const sample = episode();
+  for (const [id, baseline] of [['UP3', 100], ['UP4', 150]]) {
+    sample.frames[95].nodes.find(node => node.id === id).tmaCm = baseline;
+    sample.frames[96].nodes.find(node => node.id === id).tmaCm = baseline + 10;
+  }
+  const engine = createCiliwungEngine({ autoStart: false });
+  let state = engine.startReplay(sample);
+  for (const id of ['UP3', 'UP4']) assert.equal(state.threeDNodes.find(node => node.id === id).stageRiseM, 0);
+  state = engine.advance(300);
+  for (const id of ['UP3', 'UP4']) assert.equal(state.threeDNodes.find(node => node.id === id).stageRiseM, 0.1);
+});
+
 test('replay completion, stop/reset and restart use unique run IDs and preserve hardware telemetry', () => {
   const engine = createCiliwungEngine({ autoStart: false });
   engine.markCupCarbonTelemetry({ nodeId: 'N5' }, 1234);

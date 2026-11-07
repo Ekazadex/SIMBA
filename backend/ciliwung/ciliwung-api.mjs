@@ -138,6 +138,12 @@ export function registerCiliwungRoutes(app, {
     response.json(engine.getChartHistory());
   });
 
+  app.get('/api/ciliwung-simulation/projection', (request, response) => {
+    const nodeId = request.query?.nodeId;
+    if (!FORECAST_NODES.includes(nodeId)) return sendJson(response, 400, { error: 'unsupported_node' });
+    return response.json(engine.getLegacyProjection(nodeId));
+  });
+
   app.get('/api/ciliwung-simulation/scenario-previews', async (request, response) => {
     const nodeId = request.query?.nodeId;
     if (!FORECAST_NODES.includes(nodeId)) return sendJson(response, 400, { error: `Unsupported forecast nodeId; use ${FORECAST_NODES.join(', ')}` });

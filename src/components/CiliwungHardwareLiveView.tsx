@@ -5,6 +5,7 @@ import { maplibreGL } from '@maplibre/maplibre-gl-leaflet';
 import { setWorkerUrl, type StyleSpecification } from 'maplibre-gl';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import { Curve } from 'recharts';
 
 setWorkerUrl(workerUrl);
 
@@ -48,6 +49,7 @@ type LatestReading = {
   timestamp?: number | string | null;
   source?: string | null;
 };
+type HistoryPoint = { time: number; level: number };
 type ThresholdConfig = {
   threshold_siaga?: number;
   threshold_bahaya?: number;
@@ -61,6 +63,16 @@ const REAL_MAP_NODES: Array<{ id: string; label: string; lat: number; lng: numbe
   { id: 'N5', label: 'N5 · Manggarai', lat: -6.2078464, lng: 106.8483991 },
   { id: 'SEA', label: 'Laut Jawa', lat: -6.1178014, lng: 106.8285612 },
 ];
+const GRAPH_NODES = [
+  { id: 'N1', name: 'Pos Depok' }, { id: 'N2', name: 'Ciliwung Stage 1' },
+  { id: 'N3', name: 'Ciliwung Stage 2' }, { id: 'N4', name: 'Ciliwung Stage 3' },
+  { id: 'N5', name: 'Pintu Air Manggarai' },
+];
+
+function readingTime(timestamp?: number | string | null) {
+  if (timestamp == null) return NaN;
+  return typeof timestamp === 'number' ? (timestamp < 10_000_000_000 ? timestamp * 1000 : timestamp) : Date.parse(timestamp);
+}
 
 function statusColor(status: HardwareStatus) {
   if (status === 'BANJIR_JAKARTA') return '#2563EB';
@@ -85,7 +97,7 @@ function localFallbackCondition(level: number, config: ThresholdConfig) {
 
 function formatReadingTime(timestamp?: number | string | null) {
   if (timestamp == null) return '—';
-  const numeric = typeof timestamp === 'number' ? (timestamp < 10_000_000_000 ? timestamp * 1000 : timestamp) : Date.parse(timestamp);
+  const numeric = readingTime(timestamp);
   if (!Number.isFinite(numeric)) return '—';
   return new Intl.DateTimeFormat('id-ID', {
     timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
@@ -100,7 +112,7 @@ function areaStyle(node: HardwareNode | undefined, condition: string | null) {
   return { color: '#FACC15', radius: 260, opacity: 0.14 };
 }
 
-export function Map2D({ snapshot, fallbackLevel, config, simulation = false, extraNodes = [] }: { snapshot: HardwareSnapshot | null; fallbackLevel: number | null; config: ThresholdConfig; simulation?: boolean; extraNodes?: Array<{ id: string; label: string; lat: number; lng: number }> }) {
+export function Map2D({ snapshot, fallbackLevel, config, simulation = false, extraNodes = [], compact = false, fillHeight = false }: { snapshot: HardwareSnapshot | null; fallbackLevel: number | null; config: ThresholdConfig; simulation?: boolean; extraNodes?: Array<{ id: string; label: string; lat: number; lng: number }>; compact?: boolean; fillHeight?: boolean }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const overlayLayerRef = useRef<L.LayerGroup | null>(null);
@@ -153,7 +165,10 @@ export function Map2D({ snapshot, fallbackLevel, config, simulation = false, ext
       containerRef.current?.setAttribute('data-map-error', String(error));
       console.error('[ciliwung-map]', error);
     }
+    const resizeObserver = typeof ResizeObserver !== 'undefined' && containerRef.current ? new ResizeObserver(() => map.invalidateSize()) : null;
+    if (resizeObserver && containerRef.current) resizeObserver.observe(containerRef.current);
     return () => {
+      resizeObserver?.disconnect();
       map.remove();
       mapRef.current = null;
       overlayLayerRef.current = null;
@@ -183,7 +198,7 @@ export function Map2D({ snapshot, fallbackLevel, config, simulation = false, ext
         weight: 2,
         fillColor: markerColor,
         fillOpacity: 1,
-      }).bindTooltip(`${point.label} · ${node ? (node.valueType === 'simulation' ? 'simulasi' : node.valueType === 'derived_preset' ? 'turunan preset' : node.valueType === 'actual_sensor' ? 'sensor aktual' : 'reset') : 'menunggu data'}${node && node.valueType !== 'reset' ? ` · ${node.tmaCm.toFixed(1)} cm · ${node.status} · ${isLive ? 'LIVE' : 'STALE'} · ${formatReadingTime(snapshot?.hardware?.measuredAt ?? snapshot?.timestampUtc)}` : ''}`, { direction: 'top' }).addTo(nodeLayer);
+      }).bindTooltip(`${simulation ? point.label.replace(/^(?:UP|N)\d+ · /, '') : point.label} · ${node ? (node.valueType === 'simulation' ? 'simulasi' : node.valueType === 'derived_preset' ? 'turunan preset' : node.valueType === 'actual_sensor' ? 'sensor aktual' : 'reset') : 'menunggu data'}${node && node.valueType !== 'reset' ? ` · ${node.tmaCm.toFixed(1)} cm · ${node.status} · ${isLive ? 'LIVE' : 'STALE'} · ${formatReadingTime(snapshot?.hardware?.measuredAt ?? snapshot?.timestampUtc)}` : ''}`, { direction: 'top' }).addTo(nodeLayer);
     });
 
     // Draw metre-wide bands around the mapped river, coloured by the nearest
@@ -230,8 +245,8 @@ export function Map2D({ snapshot, fallbackLevel, config, simulation = false, ext
   }, [snapshot, condition, isLive, mapReady, showHeat, extraNodes, river, simulation]);
 
   return (
-    <div className="space-y-3" data-testid="hardware-map2d">
-      <div className="relative h-[min(72vh,760px)] min-h-[560px] w-full overflow-hidden rounded-2xl border border-slate-500/30 bg-slate-900 shadow-xl">
+    <div className={fillHeight ? "flex flex-col flex-1 min-h-[560px]" : "space-y-3"} data-testid="hardware-map2d">
+      <div className={`relative ${fillHeight ? "h-[min(72vh,760px)] lg:h-auto lg:flex-1" : "h-[min(72vh,760px)]"} min-h-[560px] w-full overflow-hidden rounded-2xl border border-slate-500/30 bg-slate-900 shadow-xl`}>
         <div ref={containerRef} className="absolute inset-0 z-0" aria-label="Peta interaktif OpenStreetMap koridor Ciliwung" />
         <div className="pointer-events-none absolute bottom-3 left-3 z-[1000] rounded-xl border border-slate-900/20 bg-slate-950/90 px-4 py-3 text-[11px] text-slate-200 shadow-lg backdrop-blur">
           <div className="mb-2 font-bold uppercase tracking-wider text-slate-300">Area indikatif · bukan batas banjir</div>
@@ -246,60 +261,82 @@ export function Map2D({ snapshot, fallbackLevel, config, simulation = false, ext
         {tileState !== 'ready' && <div role="status" className="absolute right-3 top-16 z-[1000] rounded-lg bg-slate-950/90 px-3 py-2 text-xs text-white">{tileState === 'error' ? 'Peta tidak tersedia. Periksa koneksi internet.' : 'Memuat peta…'}</div>}
         <button type="button" onClick={() => setShowHeat(!showHeat)} aria-pressed={showHeat} className="absolute left-3 top-3 z-[1000] rounded-lg bg-slate-950/90 px-3 py-2 text-xs text-white">{showHeat ? 'Sembunyikan area' : 'Tampilkan area'}</button>
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs opacity-75">
+      {!compact && <div className="flex flex-wrap items-center justify-between gap-2 text-xs opacity-75">
         <span>{simulation ? 'Data simulasi' : 'N1 Pos Depok'}: {level == null ? '—' : `${level.toFixed(1)} cm`} · {isLive ? (simulation ? 'AKTIF' : 'LIVE') : (simulation ? 'TIDAK AKTIF' : 'STALE')}</span>
         <span>Pita warna mengikuti jalur sungai berdasarkan status stasiun terdekat. Lebarnya hanya ilustrasi, bukan luas atau kedalaman banjir.</span>
-      </div>
+      </div>}
     </div>
   );
 }
 
-function GraphView({ history, fallbackLevel }: { history: number[]; fallbackLevel: number | null }) {
-  const values = history.length > 0 ? history : (fallbackLevel == null ? [] : [fallbackLevel]);
-  const max = Math.max(100, ...values, 1);
-  const points = values.map((value, index) => `${(index / Math.max(1, values.length - 1)) * 600},${220 - (value / max) * 180}`).join(' ');
+function GraphView({ history, name, derived, language, stale }: { history: HistoryPoint[]; name: string; derived: boolean; language: 'id' | 'en'; stale: boolean }) {
+  const en = language === 'en';
+  const last = history.at(-1);
+  const max = Math.max(100, ...history.map((point) => point.level), 1);
+  const maxAxis = Math.ceil(max / 20) * 20;
+  const points = last ? history.filter((point) => point.time >= last.time - 30 * 60_000)
+    .map((point) => ({ x: 350 + (point.time - last.time) / (30 * 60_000) * 300, y: 220 - (point.level / maxAxis) * 180 })) : [];
   return (
-    <div data-testid="hardware-graph" className="space-y-3">
+    <div data-testid="hardware-graph" className="min-w-0 flex-1 space-y-4 rounded-2xl border border-slate-500/20 p-4 sm:p-6">
       <div>
-        <h3 className="font-bold text-sm">Grafik TMA aktual · N1 Pos Depok</h3>
-        <p className="text-xs opacity-70">Garis ini berasal dari pembacaan ESP32, bukan nilai derived downstream.</p>
+        <p className="text-xs font-bold uppercase text-sky-400">{en ? 'Water level' : 'Tinggi muka air'}</p>
+        <h3 className="mt-1 text-xl font-bold">{name}</h3>
+        <p className="mt-1 text-xs opacity-70">{derived ? (en ? 'Derived visual preset · not a sensor reading' : 'Turunan preset visual · bukan pembacaan sensor') : (en ? 'ESP32 sensor reading' : 'Pembacaan sensor ESP32')}{last && stale ? (en ? ' · last data, offline' : ' · data terakhir, offline') : ''}</p>
       </div>
-      <div className="rounded-2xl border border-slate-500/20 bg-slate-950/70 p-3">
-        {values.length > 0 ? (
-          <svg viewBox="0 0 620 250" className="block w-full" role="img" aria-label="Grafik tinggi muka air aktual Pos Depok">
-            <line x1="10" y1="220" x2="610" y2="220" stroke="#64748B" strokeOpacity="0.5" />
-            <line x1="10" y1="40" x2="610" y2="40" stroke="#64748B" strokeOpacity="0.25" strokeDasharray="5 5" />
-            <polyline points={points} transform="translate(10 0)" fill="none" stroke="#38BDF8" strokeWidth="4" strokeLinejoin="round" strokeLinecap="round" />
-            <text x="14" y="36" fill="#CBD5E1" fontSize="11">{max.toFixed(0)} cm</text>
-            <text x="14" y="240" fill="#CBD5E1" fontSize="11">0 cm</text>
+      <div className="min-h-[260px] sm:min-h-[340px] flex items-center">
+        {last ? (
+          <svg viewBox="0 0 670 260" className="block w-full" role="img" aria-label={`${en ? 'Water level history' : 'Riwayat tinggi muka air'} ${name}`}>
+            <defs><linearGradient id="hardware-graph-area" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity=".15" /><stop offset="95%" stopColor="#3B82F6" stopOpacity="0" /></linearGradient></defs>
+            {[0, 0.25, 0.5, 0.75, 1].map((ratio) => <g key={ratio}><line x1="50" y1={220 - ratio * 180} x2="650" y2={220 - ratio * 180} stroke="#64748B" strokeOpacity="0.3" strokeDasharray="3 3" /><text x="0" y={224 - ratio * 180} fill="#94A3B8" fontSize="12">{(maxAxis * ratio).toFixed(0)}</text></g>)}
+            {[50, 200, 350, 500, 650].map((x) => <line key={x} x1={x} y1="40" x2={x} y2="220" stroke="#64748B" strokeOpacity="0.3" strokeDasharray="3 3" />)}
+            <text x="0" y="20" fill="#94A3B8" fontSize="12">cm</text>
+            {points.length > 1 && <><Curve type="monotoneX" points={points} baseLine={220} fill="url(#hardware-graph-area)" stroke="none" /><Curve data-testid="hardware-history-trace" type="monotoneX" points={points} fill="none" stroke="#3B82F6" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" /></>}
+            <circle cx="350" cy={220 - (last.level / maxAxis) * 180} r="4" fill="#3B82F6" />
+            <text x="50" y="244" fill="#94A3B8" fontSize="12">−30 {en ? 'min' : 'menit'}</text>
+            <text x="350" y="244" textAnchor="middle" fill="#94A3B8" fontSize="12">{formatReadingTime(last.time)}</text>
+            <text x="650" y="244" textAnchor="end" fill="#94A3B8" fontSize="12">+30 {en ? 'min' : 'menit'}</text>
           </svg>
-        ) : <p className="p-8 text-center text-sm opacity-70">Menunggu pembacaan ESP32…</p>}
+        ) : <p className="w-full p-8 text-center text-sm opacity-70">{en ? 'Waiting for ESP32 data…' : 'Menunggu data ESP32…'}</p>}
       </div>
+      <p className="text-xs text-amber-500" role="status">{en ? 'Sensor-based forecast is not yet available.' : 'Prediksi berbasis data sensor belum tersedia.'}</p>
     </div>
   );
 }
 
 export default function CiliwungHardwareLiveView({
   theme = 'dark',
+  language = 'id',
   latestReading = null,
+  readings = [],
   config = {},
   onEnterSimulation,
+  compact = false,
 }: {
   theme?: 'light' | 'dark';
+  language?: 'id' | 'en';
   latestReading?: LatestReading | null;
+  readings?: LatestReading[];
   config?: ThresholdConfig;
   onEnterSimulation?: () => void;
+  compact?: boolean;
 }) {
   const isDark = theme === 'dark';
   const [activeView, setActiveView] = useState<HardwareView>('map2d');
   const [snapshot, setSnapshot] = useState<HardwareSnapshot | null>(null);
-  const [history, setHistory] = useState<number[]>([]);
+  const [history, setHistory] = useState<Record<string, HistoryPoint[]>>({});
+  const [graphNodeId, setGraphNodeId] = useState('N1');
+  const [now, setNow] = useState(() => Date.now());
   const [streamError, setStreamError] = useState<string | null>(null);
   const fallbackLevel = typeof latestReading?.water_level === 'number' ? latestReading.water_level : null;
   const latestTimestamp = snapshot?.hardware?.measuredAt ?? latestReading?.timestamp;
   const isLive = snapshot?.hardware?.freshness === 'live' && snapshot.status === 'running';
   const apiBase = typeof window !== 'undefined' ? window.location.origin : '';
-  const threeDUrl = useMemo(() => `${'http://127.0.0.1:8765/?mode=hardware&nodes=N1,N2,N3,N4,N5&viewerVersion=20261031-hardware-camera&api='}${encodeURIComponent(`${apiBase}/api/ciliwung-hardware/stream`)}`, [apiBase]);
+  const threeDUrl = useMemo(() => `${'http://127.0.0.1:8765/?mode=hardware&nodes=N1,N2,N3,N4,N5&viewerVersion=20261107-responsive&embed=dashboard&api='}${encodeURIComponent(`${apiBase}/api/ciliwung-hardware/stream`)}`, [apiBase]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 10_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const stream = new EventSource(`${apiBase}/api/ciliwung-hardware/stream`);
@@ -307,9 +344,18 @@ export default function CiliwungHardwareLiveView({
       try {
         const next = JSON.parse(event.data) as HardwareSnapshot;
         setSnapshot(next);
-        if (typeof next.hardware?.tmaCm === 'number' && next.status === 'running') {
-          setHistory((current) => [...current, next.hardware!.tmaCm!].slice(-48));
-        }
+        const time = readingTime(next.hardware?.measuredAt);
+        if (next.status === 'running' && Number.isFinite(time)) {
+          setHistory((current) => {
+            const updated = { ...current };
+            for (const node of next.threeDNodes ?? []) {
+              if (!['actual_sensor', 'derived_preset'].includes(node.valueType) || !Number.isFinite(node.tmaCm)) continue;
+              const previous = current[node.id] ?? [];
+              updated[node.id] = [...previous.filter((point) => point.time !== time), { time, level: node.tmaCm }].sort((a, b) => a.time - b.time).slice(-48);
+            }
+            return updated;
+          });
+        } else if (next.status === 'idle') setHistory({});
         setStreamError(null);
       } catch {
         setStreamError('State live hardware tidak valid.');
@@ -320,9 +366,19 @@ export default function CiliwungHardwareLiveView({
     return () => stream.close();
   }, [apiBase]);
 
+  const espHistory = readings.filter((reading) => /^Hardware-ESP32(?:-Batch)?$/i.test(reading.source ?? '') && Number.isFinite(reading.water_level) && Number.isFinite(readingTime(reading.timestamp)))
+    .map((reading) => ({ time: readingTime(reading.timestamp), level: reading.water_level as number })).sort((a, b) => a.time - b.time);
+  const selectedHistory = [...(graphNodeId === 'N1' ? espHistory : []), ...(history[graphNodeId] ?? [])]
+    .filter((point, index, all) => all.findIndex((other) => other.time === point.time) === index)
+    .sort((a, b) => a.time - b.time).slice(-48);
+  const currentNodes = snapshot?.status === 'running' ? snapshot.threeDNodes : [];
+  const latestEsp = espHistory.at(-1);
+  const lastTime = selectedHistory.at(-1)?.time;
+  const graphStale = Boolean(streamError) || !lastTime || now - lastTime > 8 * 60_000;
+
   return (
-    <section data-testid="ciliwung-hardware-live-view" className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} col-span-12 w-full mt-6 rounded-2xl border p-5`}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
+    <section data-testid="ciliwung-hardware-live-view" className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} col-span-12 w-full rounded-2xl border p-4`}>
+      {!compact && <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.22em] text-[#38BDF8]">
             <span className={`h-2 w-2 rounded-full ${isLive ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
@@ -337,23 +393,38 @@ export default function CiliwungHardwareLiveView({
         </div>
       </div>
 
+      }
       <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="Tampilan live hardware">
         <button type="button" data-testid="hardware-view-map2d" onClick={() => setActiveView('map2d')} className={`rounded-lg px-3 py-2 text-xs font-bold ${activeView === 'map2d' ? 'bg-[#38BDF8] text-slate-950' : 'bg-slate-500/10'}`}>2D Map</button>
-        <button type="button" data-testid="hardware-view-graph" onClick={() => setActiveView('graph')} className={`rounded-lg px-3 py-2 text-xs font-bold ${activeView === 'graph' ? 'bg-[#38BDF8] text-slate-950' : 'bg-slate-500/10'}`}>Grafik</button>
         <button type="button" data-testid="hardware-view-3d" onClick={() => setActiveView('map3d')} className={`rounded-lg px-3 py-2 text-xs font-bold ${activeView === 'map3d' ? 'bg-[#38BDF8] text-slate-950' : 'bg-slate-500/10'}`}>3D Map</button>
-        {onEnterSimulation && <button type="button" onClick={onEnterSimulation} className="ml-auto rounded-lg bg-emerald-500 px-3 py-2 text-xs font-bold text-slate-950">Masuk Simulation</button>}
+        <button type="button" data-testid="hardware-view-graph" aria-pressed={activeView === 'graph'} onClick={() => setActiveView('graph')} className={`rounded-lg px-3 py-2 text-xs font-bold ${activeView === 'graph' ? 'bg-[#38BDF8] text-slate-950' : 'bg-slate-500/10'}`}>{language === 'en' ? 'Forecast Graph' : 'Grafik Prediksi'}</button>
+        {!compact && onEnterSimulation && <button type="button" onClick={onEnterSimulation} className="ml-auto rounded-lg bg-emerald-500 px-3 py-2 text-xs font-bold text-slate-950">Masuk Simulation</button>}
       </div>
 
       {streamError && <p role="status" className="mt-3 text-xs text-amber-400">{streamError}</p>}
-      {!isLive && <p className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-300">Map tetap menampilkan pembacaan terakhir jika tersedia. Warna live akan aktif setelah event ESP32 baru diterima.</p>}
+      {!compact && !isLive && <p className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-300">Map tetap menampilkan pembacaan terakhir jika tersedia. Warna live akan aktif setelah event ESP32 baru diterima.</p>}
 
       <div className="mt-4">
-        {activeView === 'map2d' && <Map2D snapshot={snapshot} fallbackLevel={fallbackLevel} config={config} />}
-        {activeView === 'graph' && <GraphView history={history} fallbackLevel={fallbackLevel} />}
+        {activeView === 'map2d' && <Map2D snapshot={snapshot} fallbackLevel={fallbackLevel} config={config} compact={compact} />}
+        {activeView === 'graph' && <div className="flex flex-col gap-4 xl:flex-row">
+          <GraphView history={selectedHistory} name={GRAPH_NODES.find((node) => node.id === graphNodeId)?.name ?? ''} derived={graphNodeId !== 'N1'} language={language} stale={graphStale} />
+          <section data-testid="hardware-node-levels" className="w-full rounded-2xl border border-slate-500/20 p-4 xl:w-64 xl:shrink-0">
+            <h3 className="font-bold">{language === 'en' ? 'Water levels' : 'Tinggi Muka Air'}</h3>
+            <p className="mt-1 text-xs opacity-70">{language === 'en' ? 'Select a location' : 'Pilih lokasi grafik'}</p>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-1">{GRAPH_NODES.map((node) => {
+              const data = currentNodes.find((entry) => entry.id === node.id && entry.valueType !== 'reset');
+              const level = data?.tmaCm ?? (node.id === 'N1' ? latestEsp?.level : undefined);
+              return <button type="button" key={node.id} data-testid={`hardware-node-${node.id}`} aria-pressed={graphNodeId === node.id} onClick={() => setGraphNodeId(node.id)} className={`rounded-xl border p-3 text-left ${graphNodeId === node.id ? 'border-blue-500 bg-blue-500/15' : 'border-slate-500/20 bg-slate-500/5'}`}>
+                <span className="flex items-center justify-between gap-2 text-xs font-bold"><span>{node.name}</span>{typeof level === 'number' && Number.isFinite(level) && <span>{level.toFixed(1)} cm</span>}</span>
+                <span className="mt-1 block text-[11px] opacity-70">{node.id === 'N1' ? 'ESP32' : (language === 'en' ? 'Visual preset · not sensor' : 'Preset visual · bukan sensor')}{typeof level === 'number' && (Boolean(streamError) || now - (readingTime(snapshot?.hardware?.measuredAt) || latestEsp?.time || 0) > 8 * 60_000) ? (language === 'en' ? ' · last data' : ' · data terakhir') : ''}</span>
+              </button>;
+            })}</div>
+          </section>
+        </div>}
         {activeView === 'map3d' && (
           <div data-testid="hardware-map3d" className="space-y-2">
             <p className="text-xs opacity-70">3D downstream dari Depok sampai laut. Tidak ada pilihan navigasi node sebelum Depok.</p>
-            <iframe title="Ciliwung live 3D downstream map" src={threeDUrl} className="h-[560px] w-full rounded-2xl border border-slate-500/20 bg-slate-950" />
+            <iframe title="Ciliwung live 3D downstream map" src={threeDUrl} allowFullScreen className="h-[clamp(360px,65vh,760px)] w-full rounded-2xl border border-slate-500/20 bg-slate-950" />
           </div>
         )}
       </div>

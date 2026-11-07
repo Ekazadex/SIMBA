@@ -74,7 +74,8 @@ function routeSyntheticLevels(rain) {
   for (const destinationId of NODE_IDS) {
     const destinationIndex = NODE_INDEX.get(destinationId);
     const registryNode = NODE_REGISTRY[destinationIndex];
-    const series = Array(DAY_STEPS).fill(registryNode.baselineTmaCm);
+    // This preview uses the original synthetic dataset baseline, not the legacy demo baseline.
+    const series = Array(DAY_STEPS).fill(registryNode.syntheticBaselineTmaCm ?? registryNode.baselineTmaCm);
     for (let sourceIndex = 0; sourceIndex <= destinationIndex; sourceIndex += 1) {
       const lag = REACH_DELAYS_BINS.slice(sourceIndex, destinationIndex).reduce((sum, value) => sum + value, 0);
       const attenuation = REACH_ATTENUATION ** (destinationIndex - sourceIndex);

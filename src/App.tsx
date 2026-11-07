@@ -559,7 +559,7 @@ export default function App() {
           }`}>
             <button
               id="tab-dashboard"
-              onClick={() => setActiveTab('dashboard')}
+              onClick={() => { if (activeTab === 'simulation') void handleExitSimulation(); else setActiveTab('dashboard'); }}
               className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-semibold tracking-wide transition-all cursor-pointer ${
                 activeTab === 'dashboard'
                   ? 'bg-[#3B82F6] text-black font-bold shadow-md'
@@ -569,12 +569,15 @@ export default function App() {
               }`}
             >
               <LayoutDashboard className="w-3.5 h-3.5" />
-              {language === 'en' ? 'Dashboard' : 'Dashboard'}
+              {language === 'en' ? 'Overview' : 'Ringkasan'}
             </button>
 
+            <button id="tab-simulation" onClick={() => { if (activeTab !== 'simulation') void handleEnterSimulation(); }} className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${activeTab === 'simulation' ? 'bg-[#3B82F6] text-black' : 'text-slate-500 hover:text-slate-700'}`}>
+              <Compass className="w-3.5 h-3.5" /> {language === 'en' ? 'Simulation' : 'Simulasi'}
+            </button>
             <button
               id="tab-admin"
-              onClick={() => setActiveTab('admin')}
+              onClick={async () => { if (activeTab === 'simulation') { try { await switchCiliwungMode('hardware'); } catch (error) { setAuthError(error instanceof Error ? error.message : 'Gagal keluar dari mode simulasi.'); return; } } setActiveTab('admin'); }}
               className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-semibold tracking-wide transition-all cursor-pointer ${
                 activeTab === 'admin'
                   ? 'bg-[#3B82F6] text-black font-bold shadow-md'
@@ -584,7 +587,7 @@ export default function App() {
               }`}
             >
               <ShieldCheck className="w-3.5 h-3.5" />
-              {language === 'en' ? 'PLC Control' : 'Kontrol PLC'}
+              {language === 'en' ? 'Settings' : 'Pengaturan'}
             </button>
           </div>
 
