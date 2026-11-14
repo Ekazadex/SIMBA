@@ -8,6 +8,12 @@ const DOWNSTREAM_NODES = Object.freeze([
 
 export const LIVE_HARDWARE_NODE_IDS = Object.freeze(DOWNSTREAM_NODES.map((node) => node.id));
 
+// These are visual preset limits, not calibrated physical downstream gauges.
+export function getDownstreamPresetLimits(nodeId) {
+  const node = DOWNSTREAM_NODES.find((entry) => entry.id === nodeId && entry.id !== 'N1');
+  return node ? { siaga: node.siagaCm, bahaya: node.banjirCm } : null;
+}
+
 // Fixed visual preset values. They are intentionally deterministic and are not
 // presented as calibrated downstream gauge measurements.
 const FIXED_PRESETS = Object.freeze({
@@ -124,6 +130,7 @@ export function buildHardwareSnapshot({
   thresholdBahaya = DEFAULT_THRESHOLDS.thresholdBahaya,
   runId = 'hardware-live-1',
   measuredAt = new Date().toISOString(),
+  simulated = false,
 }) {
   const level = finiteLevel(levelCm);
   const classification = classifyHardwareReading({ levelCm: level, thresholdSiaga, thresholdBahaya });
@@ -143,8 +150,8 @@ export function buildHardwareSnapshot({
       tmaCm,
       stageRiseM,
       status,
-      valueType: derived ? 'derived_preset' : 'actual_sensor',
-      source: derived ? 'fixed_preset' : 'esp32',
+      valueType: derived ? 'derived_preset' : simulated ? 'simulation' : 'actual_sensor',
+      source: derived ? 'fixed_preset' : simulated ? 'Simulator-Engine' : 'esp32',
       threeDNodeId: node.id,
       rainProfile: classification.condition,
     };
@@ -164,7 +171,7 @@ export function buildHardwareSnapshot({
       tmaCm: level,
       measuredAt,
       freshness: 'live',
-      valueType: 'actual_sensor',
+      valueType: simulated ? 'simulation' : 'actual_sensor',
       condition: classification.condition,
       profileLabel: preset.label,
       alertStatus: classification.alertStatus,

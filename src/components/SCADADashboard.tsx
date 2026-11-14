@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { illustrativeWeather } from '../demo-estimates.mjs';
 import { db, firebaseConfigured, handleFirestoreError, OperationType } from '../firebaseConfig';
 import { collection, query, orderBy, limit, onSnapshot, doc, getDocs, where } from 'firebase/firestore';
 import { 
@@ -57,6 +58,8 @@ import {
   ReferenceLine
 } from 'recharts';
 import CiliwungHardwareLiveView from './CiliwungHardwareLiveView';
+import { normalizeReading } from '../normalize-reading.mjs';
+import { loadHardwareHistory24h } from '../hardware-history';
 
 /**
  * Extracts a numeric timestamp (milliseconds) from various Firestore field formats
@@ -191,6 +194,7 @@ export default function SCADADashboard({
     }
   };
 
+  const [weatherDemo, setWeatherDemo] = useState(false);
   const [weatherContext, setWeatherContext] = useState<{ status?: string; source?: string; weatherDesc?: string; validFrom?: string; validTo?: string; temperatureC?: number | null; humidityPercent?: number | null; windSpeedKph?: number | null; windDirection?: string | null; visibility?: string | null; weatherIcon?: string | null; location?: { desa?: string; kecamatan?: string; kotkab?: string } } | null>(null);
   useEffect(() => {
     const controller = new AbortController();
@@ -441,14 +445,15 @@ export default function SCADADashboard({
       setIsDeviceOffline(true);
       return;
     }
-    // 1. Listen for recent sensor readings (last 20 documents for ultra-low quota footprint)
+    // Keep enough batches for the overview's 30-minute history at 20-second uploads.
     const unsubscribeReadings = onSnapshot(
-      getFirestoreQuery('sensor_readings', 20),
+      getFirestoreQuery('sensor_readings', 120),
       (snapshot) => {
         setHasReceivedReadingsSnapshot(true);
         const data: SensorReading[] = [];
         snapshot.forEach((doc) => {
-          const docData = doc.data();
+          const docData = normalizeReading(doc.data(), config?.reference_height ?? 300);
+          if (!docData) return;
           const parsedTs = extractReadingTimestamp(docData);
           data.push({ 
             id: doc.id, 
@@ -521,7 +526,7 @@ export default function SCADADashboard({
       unsubscribePrediction();
       unsubscribeBMKG();
     };
-  }, []);
+  }, [config?.reference_height, config?.auto_simulation]);
 
   // Trigger Gemini Prognostic Analysis using High Thinking Mode
   const triggerAIEngine = async () => {
@@ -973,12 +978,13 @@ export default function SCADADashboard({
       let exportList: SensorReading[] = [];
       if (snap && !snap.empty) {
         snap.forEach((d) => {
-          const docData = d.data();
+          const docData = normalizeReading(d.data(), config?.reference_height ?? 300);
           const parsedTs = extractReadingTimestamp(docData);
+          if (!docData || parsedTs === null || !Number.isFinite(parsedTs)) return;
           exportList.push({
             id: d.id,
             ...docData,
-            timestamp: parsedTs ?? (docData.timestamp || Date.now())
+            timestamp: parsedTs
           } as SensorReading);
         });
         exportList.sort((a, b) => a.timestamp - b.timestamp);
@@ -1000,30 +1006,37 @@ export default function SCADADashboard({
       const rows = exportList.map(r => {
         const dateStr = new Date(r.timestamp).toISOString();
         const localTimeStr = new Date(r.timestamp).toLocaleString('id-ID');
-        const rainLabel = r.local_rain === 0 ? 'Kering' : r.local_rain === 1 ? 'Ringan' : r.local_rain === 2 ? 'Sedang' : 'Lebat';
+        const rainLabel = r.local_rain === 0 ? 'Kering' : r.local_rain === 1 ? 'Ringan' : r.local_rain === 2 ? 'Sedang' : r.local_rain === 3 ? 'Lebat' : '';
         return [
           dateStr,
-          `"${localTimeStr}"`,
+          localTimeStr,
           r.water_level,
           r.temperature,
           r.humidity,
-          `"${rainLabel}"`,
-          `"${r.source || 'Hardware-ESP32'}"`,
+          rainLabel,
+          r.source || '',
           r.distance ?? ''
         ];
       });
 
-      const csvContent = "\ufeff" + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+      const csvCell = (value: unknown) => {
+        let text = String(value ?? '');
+        if (typeof value !== 'number' && /^[\s]*[=+\-@\t\r]/.test(text)) text = `'${text}`;
+        return `"${text.replace(/"/g, '""')}"`;
+      };
+      const csvContent = "\ufeff" + [headers, ...rows].map(row => row.map(csvCell).join(',')).join('\r\n');
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.setAttribute('href', url);
-      link.setAttribute('download', `scada_sensor_logs_24h_${new Date().toISOString().slice(0,10)}.csv`);
+      link.setAttribute('download', `scada_sensor_logs_limited_${new Date().toISOString().slice(0,10)}.csv`);
       link.style.visibility = 'hidden';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
+      setExportNotice(language === 'en' ? 'Export is limited and may not cover all 24 hours. A fallback may include older records.' : 'Ekspor terbatas dan mungkin tidak mencakup seluruh 24 jam. Kueri cadangan dapat menyertakan data lebih lama.');
+      setTimeout(() => setExportNotice(null), 10000);
     } catch (error) {
       console.error('Error exporting CSV:', error);
       setExportNotice(
@@ -1038,8 +1051,10 @@ export default function SCADADashboard({
   };
 
   // Extract raw batch array from either 'readings' (ESP32 direct) or 'batch_data'
-  const rawBatch: any[] = (latestReading as any)?.readings || (latestReading as any)?.batch_data || [];
+  const rawBatch: any[] = Array.isArray((latestReading as any)?.readings) && (latestReading as any).readings.length
+    ? (latestReading as any).readings : Array.isArray((latestReading as any)?.batch_data) ? (latestReading as any).batch_data : [];
   const hasBatchData = Boolean(Array.isArray(rawBatch) && rawBatch.length > 0);
+  const isBatchMode = useBatch360Mode && hasBatchData;
   const activeReadings = chartRange === 'realtime' ? readingsList.slice(-20) : readingsList;
   const refHeight = config?.reference_height || 300;
 
@@ -1078,16 +1093,19 @@ export default function SCADADashboard({
     };
   });
 
-  const chartData = (useBatch360Mode && hasBatchData) 
+  const chartData = isBatchMode
     ? rawBatch.map((item: any, idx: number) => {
-        let timeLabel = `T+${idx}s`;
-        let val = 0;
-        let rawDist = 0;
+        let timeLabel = `#${idx + 1}`;
+        let val: number | null = null;
+        let rawDist: number | null = null;
 
         if (Array.isArray(item)) {
           timeLabel = String(item[0]);
-          val = Number(item[1]) || 0;
-          rawDist = Math.max(0, Math.round((refHeight - val) * 10) / 10);
+          const level = typeof item[1] === 'number' ? item[1] : NaN;
+          if (Number.isFinite(level)) {
+            val = level;
+            rawDist = Math.max(0, Math.round((refHeight - level) * 10) / 10);
+          }
         } else if (item && typeof item === 'object') {
           const ts = item.timestamp ?? item.time;
           if (typeof ts === 'number') {
@@ -1100,10 +1118,10 @@ export default function SCADADashboard({
             timeLabel = ts;
           }
 
-          if (typeof item.distance === 'number') {
+          if (typeof item.distance === 'number' && Number.isFinite(item.distance)) {
             rawDist = Math.round(item.distance * 10) / 10;
             val = Math.max(0, Math.round((refHeight - rawDist) * 10) / 10);
-          } else if (typeof item.water_level === 'number') {
+          } else if (typeof item.water_level === 'number' && Number.isFinite(item.water_level)) {
             val = Math.round(item.water_level * 10) / 10;
             rawDist = Math.max(0, Math.round((refHeight - val) * 10) / 10);
           }
@@ -1128,9 +1146,9 @@ export default function SCADADashboard({
     { name: 'T+6h', prediksi: latestPrediction.prediction_6h }
   ] : [];
 
+  const demoWeather = latestReading && !isDeviceOffline ? illustrativeWeather(latestReading.water_level, config?.threshold_siaga ?? 60, config?.threshold_bahaya ?? 90) : null;
   return (
     <div id="scada-dashboard-root" className="space-y-6 pb-12">
-      <h1 className="text-2xl sm:text-3xl font-bold">{language === 'en' ? 'Monitoring overview' : 'Ringkasan Pemantauan'}</h1>
       <div id="scada-hardware-pause-banner" role="status" className={`rounded-2xl border p-5 flex flex-wrap items-center justify-between gap-3 ${isDark ? 'bg-slate-800/70 border-slate-700' : 'bg-blue-50 border-blue-100'}`}>
         <div className="flex items-start gap-3"><Info className="w-6 h-6 text-blue-500 shrink-0" /><div>
           <p className="font-bold text-lg">{!latestReading ? (language === 'en' ? 'Sensor data unavailable' : 'Data sensor belum tersedia') : isDeviceOffline ? (language === 'en' ? 'Sensor offline · last reading' : 'Sensor offline · data terakhir') : (language === 'en' ? 'Sensor data available' : 'Data sensor tersedia')}</p>
@@ -1140,11 +1158,16 @@ export default function SCADADashboard({
         {latestReading && !isDeviceOffline && <div className={`px-3 py-2 rounded-xl text-xs font-bold ${alertBg}`}><span className={`w-2 h-2 rounded-full ${alertLed} inline-block mr-2`} />{alertLabel}</div>}
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-5 items-stretch">
-        <div className="lg:col-span-3 min-w-0"><CiliwungHardwareLiveView theme={theme} language={language} latestReading={latestReading} readings={readingsList} config={config ?? {}} compact /></div>
+        <div className="lg:col-span-3 min-w-0"><CiliwungHardwareLiveView theme={theme} language={language} latestReading={latestReading} readings={readingsList} config={config ?? {}} loadDayHistory={firebaseConfigured && db ? () => loadHardwareHistory24h(db, config?.reference_height ?? 300) : undefined} compact /></div>
         <div className="lg:col-span-1 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-5 content-start auto-rows-min">
           <section className={`${themeCard} rounded-2xl p-6 flex flex-col gap-4`}>
-            <div className="flex items-center justify-between gap-2"><h2 className="font-bold text-lg flex items-center gap-2"><CloudRain className="w-5 h-5 text-sky-500" />{language === 'en' ? 'Weather' : 'Cuaca Saat Ini'}</h2><span className="text-xs opacity-70">{weatherContext?.source || 'BMKG'}</span></div>
-            {weatherContext?.status === 'available' ? <div className="space-y-4">
+            <div className="flex items-center justify-between gap-2"><h2 className="font-bold text-lg flex items-center gap-2"><CloudRain className="w-5 h-5 text-sky-500" />{language === 'en' ? 'Weather' : 'Cuaca Saat Ini'}</h2><span className="text-xs opacity-70">{weatherDemo ? 'SIMULASI' : (weatherContext?.source || 'BMKG')}</span></div>
+            <button type="button" onClick={() => setWeatherDemo(value => !value)} className="rounded-lg border border-sky-500/40 px-3 py-2 text-xs font-semibold text-sky-400">{weatherDemo ? 'Gunakan data cuaca tersedia' : 'Simulasi cuaca dari status sensor'}</button>
+            {weatherDemo ? demoWeather ? <div className="space-y-4" data-testid="demo-weather">
+              <p className="text-xs text-amber-500">Skenario ilustratif berdasarkan status tinggi air. Suhu, kelembapan, angin, dan jarak pandang adalah nilai preset, bukan pengukuran atau prakiraan cuaca.</p>
+              <p className="text-xl font-bold">{demoWeather.temperature}°C · {demoWeather.description}</p>
+              <div className="grid grid-cols-2 gap-2 text-xs">{[['Kelembapan', `${demoWeather.humidity}%`], ['Kecepatan angin', `${demoWeather.wind} km/h`], ['Arah angin', demoWeather.direction], ['Jarak pandang', demoWeather.visibility]].map(([label, value]) => <div key={label} className={`rounded-xl border p-3 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-200'}`}><span className="block opacity-70">{label}</span><strong>{value}</strong></div>)}</div>
+            </div> : <p className="text-sm opacity-70">Menunggu data sensor aktif untuk memilih skenario ilustratif.</p> : weatherContext?.status === 'available' ? <div className="space-y-4">
               <p className="text-xs font-bold tracking-wider text-sky-500 uppercase">{weatherContext.source === 'BMKG' ? 'Prakiraan BMKG' : 'Open-Meteo'}</p>
               <div className="flex items-center gap-3">
                 {weatherContext.weatherIcon ? <img src={weatherContext.weatherIcon} alt="" className="w-14 h-14 object-contain" referrerPolicy="no-referrer" /> : <CloudRain className="w-12 h-12 text-sky-400 shrink-0" />}
@@ -1581,10 +1604,10 @@ export default function SCADADashboard({
                       ? 'bg-emerald-500 text-black font-bold'
                       : `${themeTextSub} hover:text-emerald-400`
                   }`}
-                  title={language === 'en' ? 'Show raw JSN-SR04T reflection distance in cm' : 'Tampilkan data mentah jarak pantul sensor ultrasonik JSN-SR04T (cm)'}
+                  title={language === 'en' ? 'Show sensor distance; missing values may be estimated from the configured reference' : 'Tampilkan jarak sensor; nilai yang tidak tersedia dapat diperkirakan dari referensi'}
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  {language === 'en' ? 'Raw Ultrasonic (d)' : 'Raw Ultrasonik (d)'}
+                  {language === 'en' ? 'Sensor Distance (d)' : 'Jarak Sensor (d)'}
                 </button>
               </div>
 
@@ -1595,7 +1618,7 @@ export default function SCADADashboard({
                     setUseBatch360Mode(false);
                     setChartRange('realtime');
                   }}
-                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${(!useBatch360Mode && chartRange === 'realtime') ? 'bg-[#3B82F6] text-black font-bold' : `${themeTextSub} hover:text-[#3B82F6]`}`}
+                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${(!isBatchMode && chartRange === 'realtime') ? 'bg-[#3B82F6] text-black font-bold' : `${themeTextSub} hover:text-[#3B82F6]`}`}
                   title={language === 'en' ? 'High resolution chart showing last 20 telemetry readings' : 'Grafik resolusi tinggi menampilkan 20 pembacaan telemetri terakhir'}
                 >
                   {language === 'en' ? 'Real-time (20 Pts)' : 'Terkini (20 Poin)'}
@@ -1606,19 +1629,20 @@ export default function SCADADashboard({
                     setUseBatch360Mode(false);
                     setChartRange('24h');
                   }}
-                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${(!useBatch360Mode && chartRange === '24h') ? 'bg-[#3B82F6] text-black font-bold' : `${themeTextSub} hover:text-[#3B82F6]`}`}
-                  title={language === 'en' ? 'Cumulative 24-hour water elevation trend' : 'Grafik histori elevasi air akumulatif dari 24 jam terakhir'}
+                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${(!isBatchMode && chartRange === '24h') ? 'bg-[#3B82F6] text-black font-bold' : `${themeTextSub} hover:text-[#3B82F6]`}`}
+                  title={language === 'en' ? 'History currently loaded (up to 120 packets)' : 'Riwayat yang sudah dimuat (hingga 120 paket)'}
                 >
-                  {language === 'en' ? '24h Trend' : 'Tren 24 Jam'}
+                  {language === 'en' ? 'Loaded History' : 'Riwayat Dimuat'}
                 </button>
                 <button 
                   id="btn-range-batch360"
                   onClick={() => setUseBatch360Mode(!useBatch360Mode)}
-                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer flex items-center gap-1 ${useBatch360Mode ? 'bg-emerald-500 text-black font-bold' : `${themeTextSub} hover:text-emerald-400`}`}
-                  title={language === 'en' ? 'Visualize 360 continuous sample array in 1 ESP32 batch' : 'Tampilkan visualisasi 360 array sampel kontinu dalam 1 siklus batch ESP32'}
+                  disabled={!hasBatchData}
+                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1 ${isBatchMode ? 'bg-emerald-500 text-black font-bold' : `${themeTextSub} hover:text-emerald-400`}`}
+                  title={hasBatchData ? (language === 'en' ? 'Show samples from the latest packet' : 'Tampilkan sampel dari paket terakhir') : (language === 'en' ? 'No packet samples available' : 'Sampel paket tidak tersedia')}
                 >
-                  <span className={`w-1.5 h-1.5 rounded-full ${useBatch360Mode ? 'bg-black' : 'bg-emerald-400 animate-pulse'}`} />
-                  {language === 'en' ? '360-Pt Batch' : 'Batch 360 Titik'}
+                  <span className={`w-1.5 h-1.5 rounded-full ${isBatchMode ? 'bg-black' : 'bg-emerald-400 animate-pulse'}`} />
+                  {language === 'en' ? `Batch (${rawBatch.length})` : `Batch (${rawBatch.length} titik)`}
                 </button>
               </div>
 
@@ -1628,7 +1652,7 @@ export default function SCADADashboard({
                   id="btn-export-csv"
                   onClick={handleExportCSV}
                   disabled={isExportingCSV}
-                  title={language === 'en' ? 'Export last 24 hours sensor logs to CSV' : 'Ekspor Log Sensor 24 Jam Terakhir ke format CSV'}
+                  title={language === 'en' ? 'Export up to 1,500 queried logs; data may be incomplete' : 'Ekspor hingga 1.500 log; data mungkin tidak lengkap'}
                   className={`flex items-center gap-1.5 px-3 py-1.5 border text-[10px] font-mono rounded-lg transition-all cursor-pointer ${
                     isDark 
                       ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300' 
@@ -1643,7 +1667,7 @@ export default function SCADADashboard({
                   <span className="font-bold">
                     {isExportingCSV 
                       ? (language === 'en' ? 'QUERYING 24H...' : 'MENGAMBIL 24 JAM...') 
-                      : (language === 'en' ? 'EXPORT CSV' : 'EXPORT DATA')}
+                      : (language === 'en' ? 'EXPORT LOGS' : 'EKSPOR LOG')}
                   </span>
                 </button>
 
@@ -1674,7 +1698,7 @@ export default function SCADADashboard({
               ) : (
                 <>
                   <span className={`text-[9px] text-emerald-400 flex items-center gap-1 font-mono uppercase tracking-wider`}>
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block animate-pulse" /> {language === 'en' ? 'Sensor Distance (d)' : 'Jarak Sensor ke Air (cm)'}
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block animate-pulse" /> {language === 'en' ? 'Distance (may be estimated)' : 'Jarak (dapat berupa perkiraan)'}
                   </span>
                   <span className={`text-[9px] ${themeTextMuted} flex items-center gap-1 font-mono uppercase tracking-wider`}>
                     <span className="w-2.5 h-0.5 bg-zinc-500 inline-block border-t border-dashed" /> H_REF: {config?.reference_height || 300}cm
@@ -1684,6 +1708,7 @@ export default function SCADADashboard({
             </div>
           </div>
 
+          {!isBatchMode && chartViewMode === 'elevation' && <p className={`mb-2 text-xs ${themeTextMuted}`}>{language === 'en' ? 'Isolated upward spikes may be adjusted for display; stored readings are unchanged.' : 'Lonjakan tunggal ke atas dapat disesuaikan pada tampilan; data tersimpan tidak berubah.'}</p>}
           <div className="w-full h-72">
             {!hasReceivedReadingsSnapshot ? (
               <div className={`w-full h-full flex flex-col items-center justify-center ${themeTextMuted} font-mono text-[10px] uppercase tracking-widest`}>
@@ -1748,7 +1773,7 @@ export default function SCADADashboard({
               </div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <AreaChart data={chartData} margin={{ top: 10, right: 55, left: -20, bottom: 0 }}>
                   <defs>
                     <linearGradient id="colorLevel" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.15}/>
@@ -1762,7 +1787,7 @@ export default function SCADADashboard({
                   <CartesianGrid strokeDasharray="3 3" stroke={themeGridColor} />
                   <XAxis dataKey="time" stroke="#52525B" style={{ fontSize: 9, fontFamily: 'monospace' }} />
                   <YAxis 
-                    domain={chartViewMode === 'elevation' ? [0, 160] : [0, Math.max(300, (config?.reference_height || 300) + 20)]} 
+                    domain={chartViewMode === 'elevation' ? [0, Math.ceil(Math.max(160, Number.isFinite(thresholdSiaga) ? thresholdSiaga : 0, Number.isFinite(thresholdBahaya) ? thresholdBahaya : 0, ...chartData.map(point => Number.isFinite(point.elevasi) ? point.elevasi : 0)) / 20) * 20] : [0, Math.ceil(Math.max(300, (config?.reference_height || 300) + 20, ...chartData.map(point => Number.isFinite(point.raw_distance) ? point.raw_distance : 0)) / 20) * 20]}
                     stroke="#52525B" 
                     style={{ fontSize: 9, fontFamily: 'monospace' }} 
                   />
@@ -1779,7 +1804,7 @@ export default function SCADADashboard({
                     </>
                   ) : (
                     <>
-                      <Area type="monotone" dataKey="raw_distance" name={language === 'en' ? "Raw Sensor Gap (cm)" : "Raw Jarak Ultrasonik (cm)"} stroke="#10B981" strokeWidth={1.5} fillOpacity={1} fill="url(#colorRaw)" />
+                      <Area type="monotone" dataKey="raw_distance" name={language === 'en' ? "Sensor distance; may be estimated (cm)" : "Jarak sensor; dapat berupa perkiraan (cm)"} stroke="#10B981" strokeWidth={1.5} fillOpacity={1} fill="url(#colorRaw)" />
                       <ReferenceLine y={config?.reference_height || 300} stroke="#71717A" strokeDasharray="3 3" strokeWidth={1} label={{ value: 'TIANG/REF', fill: '#71717A', fontSize: 8, position: 'right', fontFamily: 'monospace' }} />
                     </>
                   )}

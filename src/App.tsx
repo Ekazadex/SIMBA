@@ -572,7 +572,7 @@ export default function App() {
               {language === 'en' ? 'Overview' : 'Ringkasan'}
             </button>
 
-            <button id="tab-simulation" onClick={() => { if (activeTab !== 'simulation') void handleEnterSimulation(); }} className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${activeTab === 'simulation' ? 'bg-[#3B82F6] text-black' : 'text-slate-500 hover:text-slate-700'}`}>
+            <button id="tab-simulation" onClick={() => { if (activeTab !== 'simulation') void handleEnterSimulation(); }} className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${activeTab === 'simulation' ? 'bg-[#3B82F6] text-black' : 'text-slate-500 hover:text-slate-700'}`}>
               <Compass className="w-3.5 h-3.5" /> {language === 'en' ? 'Simulation' : 'Simulasi'}
             </button>
             <button

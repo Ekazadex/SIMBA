@@ -435,12 +435,6 @@ export default function AdminPanel({
       });
       await appendConsoleLog(`Konfigurasi ambang batas diperbarui: Siaga=${thresholdSiaga}cm, Bahaya=${thresholdBahaya}cm, Ref=${refHeight}cm`, 'info');
       
-      // Request express server to immediately inject a matching simulated reading with the new config
-      await fetch('/api/sim-data', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: simMode })
-      });
     } catch (e) {
       console.error(e);
       await appendConsoleLog('Gagal memperbarui konfigurasi ambang batas', 'error');

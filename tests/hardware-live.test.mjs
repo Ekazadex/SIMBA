@@ -49,6 +49,15 @@ test('builds a downstream-only snapshot with one actual sensor and fixed derived
   assert.equal(snapshot.threeDNodes[4].source, 'fixed_preset');
 });
 
+test('simulator reading drives 3D without being labelled as an ESP32 sensor', () => {
+  const snapshot = buildHardwareSnapshot({ levelCm: 120, simulated: true });
+  assert.equal(snapshot.hardware.valueType, 'simulation');
+  assert.equal(snapshot.threeDNodes[0].tmaCm, 120);
+  assert.equal(snapshot.threeDNodes[0].stageRiseM, 0.6);
+  assert.equal(snapshot.threeDNodes[0].source, 'Simulator-Engine');
+  assert.equal(snapshot.threeDNodes[1].valueType, 'derived_preset');
+});
+
 test('hardware bus fans one snapshot to SSE subscribers and CupCarbon, then resets cleanly', () => {
   const published = [];
   const cupCommands = [];

@@ -11,7 +11,7 @@ import { createServer as createViteServer } from 'vite';
 import { createSocket } from 'node:dgram';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, addDoc, getDocs, query, orderBy, limit, setDoc, doc, onSnapshot, deleteDoc, where } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, getDoc, getDocs, query, orderBy, limit, setDoc, doc, onSnapshot, deleteDoc, where } from 'firebase/firestore';
 import { createCiliwungEngine } from './backend/ciliwung/simulation-engine.mjs';
 import { registerCiliwungRoutes } from './backend/ciliwung/ciliwung-api.mjs';
 import { createForecastWorker } from './backend/ciliwung/forecast-worker.mjs';
@@ -19,6 +19,8 @@ import { sendForecastCupCarbon } from './backend/ciliwung/forecast-udp.mjs';
 import { createWeatherContextHandler } from './backend/ciliwung/weather-context.mjs';
 import { createCupCarbonTelemetryListener, CUPCARBON_TELEMETRY_PORT } from './backend/ciliwung/cupcarbon-telemetry.mjs';
 import { createHardwareLiveBus, registerHardwareLiveRoutes, createCiliwungModeController } from './backend/ciliwung/hardware-live.mjs';
+import { normalizeReading } from './src/normalize-reading.mjs';
+import { createHardware20sWorker, registerHardwareDemoForecast } from './backend/ciliwung/hardware-demo-forecast.mjs';
 
 dotenv.config();
 
@@ -43,6 +45,8 @@ app.use((req, res, next) => {
 const cupCarbonSocket = createSocket('udp4');
 const ciliwungEngine = createCiliwungEngine({ intervalMs: 500 });
 const forecastWorker = createForecastWorker();
+const hardware20sWorker = createHardware20sWorker();
+registerHardwareDemoForecast(app, hardware20sWorker);
 const hardwareLiveBus = (createHardwareLiveBus as any)({
   sendCupCarbon: (commands) => {
     for (const command of commands) {
@@ -110,6 +114,7 @@ cupCarbonTelemetry.listening
 process.on('exit', () => {
   ciliwungRoutes.unsubscribe();
   forecastWorker.close();
+  hardware20sWorker.close();
   cupCarbonTelemetry.close();
   hardwareLiveBus.close();
   try {
@@ -182,7 +187,9 @@ let manualScenarioTimer: NodeJS.Timeout | null = null;
 if (db) {
   onSnapshot(doc(db, 'system_config', DEFAULT_NODE_ID), (snapshot) => {
     if (snapshot.exists()) {
+      const wasSimulated = hardwareLiveBus.getState().hardware?.valueType === 'simulation';
       currentConfig = { ...currentConfig, ...snapshot.data() } as any;
+      if (wasSimulated && !currentConfig.auto_simulation) hardwareLiveBus.reset();
       console.log('[Server] Real-time config synced:', currentConfig);
     } else {
       // Seed initial config if missing
@@ -196,18 +203,37 @@ if (db) {
 }
 
 if (db) {
+  onSnapshot(query(collection(db, 'sensor_readings'), orderBy('timestamp', 'desc'), limit(1)), (snapshot) => {
+    const latest = snapshot.docs[0]?.data();
+    const reading = normalizeReading(latest, currentConfig.reference_height);
+    if (!reading || !String(reading.source || '').toLowerCase().includes('hardware')) return;
+    const timestamp = Number(reading.timestamp);
+    if (!Number.isFinite(timestamp)) return;
+    const timestampMs = timestamp < 10000000000 ? timestamp * 1000 : timestamp;
+    if (Date.now() - timestampMs > 8 * 60 * 1000) return;
+    const previous = hardwareLiveBus.getState().hardware;
+    const measuredAt = new Date(timestampMs).toISOString();
+    if (previous?.measuredAt === measuredAt && previous?.valueType === 'actual_sensor') return;
+    hardwareLiveBus.publishReading({ levelCm: reading.water_level, thresholdSiaga: currentConfig.threshold_siaga,
+      thresholdBahaya: currentConfig.threshold_bahaya, measuredAt });
+  }, (error) => console.error('[Hardware Live] Firestore listener failed:', error));
   getDocs(query(collection(db, 'sensor_readings'), orderBy('timestamp', 'desc'), limit(1)))
-    .then((snapshot) => {
+    .then(async (snapshot) => {
       const latest = snapshot.docs[0]?.data();
       const source = String(latest?.source || '').toLowerCase();
-      if (latest && source.includes('hardware') && Number.isFinite(Number(latest.water_level))) {
+      const simulated = source === 'simulator-engine';
+      const configSnapshot = simulated ? await getDoc(doc(db, 'system_config', DEFAULT_NODE_ID)) : null;
+      const config = configSnapshot?.data() ?? currentConfig;
+      if (latest && simulated && config.auto_simulation &&
+          hardwareLiveBus.getState().status === 'idle' && Number.isFinite(Number(latest.water_level))) {
         hardwareLiveBus.publishReading({
           levelCm: Number(latest.water_level),
-          thresholdSiaga: currentConfig.threshold_siaga,
-          thresholdBahaya: currentConfig.threshold_bahaya,
+          thresholdSiaga: config.threshold_siaga,
+          thresholdBahaya: config.threshold_bahaya,
           measuredAt: new Date(Number(latest.timestamp) || Date.now()).toISOString(),
+          simulated,
         });
-        console.log('[Hardware Live] Seeded from the latest persisted ESP32 reading.');
+        console.log(`[Hardware Live] Seeded from the latest persisted ${simulated ? 'simulation' : 'ESP32'} reading.`);
       }
     })
     .catch((error) => console.error('[Hardware Live] Could not seed latest reading:', error));
@@ -317,6 +343,14 @@ async function generateSimulationData(isManual = false, overrideWaterLevel?: num
       temperature: Math.round(temp * 10) / 10,
       humidity: Math.round(humidity * 10) / 10,
       node_id: currentConfig.node_id,
+    });
+
+    hardwareLiveBus.publishReading({
+      levelCm: correctedLevel,
+      thresholdSiaga: currentConfig.threshold_siaga,
+      thresholdBahaya: currentConfig.threshold_bahaya,
+      measuredAt: new Date(timestamp).toISOString(),
+      simulated: true,
     });
 
     console.log(`[Simulator] Manual Tick: mode=${currentConfig.simulation_mode}, Level=${correctedLevel}cm.`);
