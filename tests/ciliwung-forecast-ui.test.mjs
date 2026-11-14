@@ -539,12 +539,11 @@ test('forecast graph retains per-node forecasts and rejects missing thresholds',
   } finally { ui.restore(); }
 });
 
-test('single-node legacy prediction panel states provenance without claiming LSTM or invented per-horizon confidence', async () => {
+test('monitoring overview keeps the hardware graph without the legacy details panel', async () => {
   const source = await readFile(scadaPath, 'utf8');
-  assert.match(source, /fetch\('\/api\/predict'/, 'single-node endpoint remains unchanged');
-  assert.match(source, /Single-node advisory.*Gemini.*heuristic/i);
-  assert.doesNotMatch(source, /Processed LSTM/i);
-  assert.doesNotMatch(source, /Math\.round\(latestPrediction\.confidence_score\s*\*/);
+  assert.match(source, /<CiliwungHardwareLiveView\b/);
+  assert.doesNotMatch(source, /Lihat detail sensor, grafik, dan analisis|View sensor details, charts and analysis/);
+  assert.doesNotMatch(source, /id="measurement-grid"/);
 });
 
 test('legacy graph restores the backend-selected rainfall profile after a page reconnect', () => {
