@@ -331,7 +331,7 @@ export default function CiliwungHardwareLiveView({
   const latestTimestamp = snapshot?.hardware?.measuredAt ?? latestReading?.timestamp;
   const isLive = snapshot?.hardware?.freshness === 'live' && snapshot.status === 'running';
   const apiBase = typeof window !== 'undefined' ? window.location.origin : '';
-  const threeDUrl = useMemo(() => `${'http://127.0.0.1:8765/?mode=hardware&nodes=N1,N2,N3,N4,N5&viewerVersion=20261107-responsive&embed=dashboard&api='}${encodeURIComponent(`${apiBase}/api/ciliwung-hardware/stream`)}`, [apiBase]);
+  const threeDUrl = useMemo(() => `/3d/?mode=hardware&nodes=N1,N2,N3,N4,N5&viewerVersion=20261107-responsive&embed=dashboard&api=${encodeURIComponent(`${apiBase}/api/ciliwung-hardware/stream`)}`, [apiBase]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 10_000);

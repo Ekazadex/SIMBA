@@ -138,7 +138,7 @@ export default function CiliwungSimulationPage({
   const apiBase = typeof window !== 'undefined' ? window.location.origin : '';
   const threeDUrl = useMemo(() => {
     const streamUrl = `${apiBase}/api/ciliwung-simulation/stream`;
-    return `http://127.0.0.1:8765/?mode=backend&ui=20261107-location-names&embed=dashboard&api=${encodeURIComponent(streamUrl)}`;
+    return `/3d/?mode=backend&ui=20261107-location-names&embed=dashboard&api=${encodeURIComponent(streamUrl)}`;
   }, [apiBase]);
 
   useEffect(() => {
@@ -539,7 +539,7 @@ export default function CiliwungSimulationPage({
         <section className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} rounded-2xl border p-3 lg:p-5 flex flex-1 flex-col`}>
           <div className={`flex items-center justify-between px-2 pb-3 text-[10px] font-mono uppercase tracking-widest ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
             <span>3D Ciliwung Renderer</span>
-            <span>Backend mode · localhost:8765</span>
+            <span>Mode simulasi 3D</span>
           </div>
           <iframe title="Ciliwung 3D simulation" src={threeDUrl} className="w-full h-[clamp(360px,65vh,760px)] lg:h-auto lg:flex-1 min-h-[360px] rounded-xl border border-white/10 bg-black" />
         </section>

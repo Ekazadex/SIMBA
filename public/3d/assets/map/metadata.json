@@ -1,0 +1,42 @@
+{
+  "title": "Ciliwung corridor overview, Puncak through Manggarai to the Java Sea",
+  "renderedFrom": [
+    "SRTM terrain relief",
+    "CupVisual OSM/Overpass GPS centerline (full corridor)",
+    "nine exact CupVisual station waypoints",
+    "downstream OSM roads/places only",
+    "illustrative sea region aligned to the mapped downstream endpoint",
+    "OSM building footprints for 3D proxies",
+    "OSM tree points for 3D vegetation",
+    "local OSM land-use based proxy context around nodes"
+  ],
+  "bounds": {
+    "west": 106.75,
+    "east": 106.99,
+    "south": -6.72,
+    "north": -6.08
+  },
+  "attribution": "© OpenStreetMap contributors",
+  "license": "Open Database License (ODbL) 1.0",
+  "attributionUrl": "https://www.openstreetmap.org/copyright",
+  "featureCounts": {
+    "roads": 76994,
+    "places": 294,
+    "buildingFootprints": 7362,
+    "buildingLanduseProxies": 247,
+    "treePointsSelected": 1332,
+    "treeLanduseProxies": 81
+  },
+  "featuresRendered": {
+    "roads": 76994,
+    "placeLabels": 35
+  },
+  "sea": {
+    "startLatitude": -6.1178014,
+    "elevationM": 0,
+    "label": "Laut Jawa",
+    "shorelineMethod": "simplified straight shoreline aligned with the downstream endpoint of the mapped OSM Ciliwung centerline",
+    "illustrative": true
+  },
+  "note": "Static SRTM relief and CupVisual OSM/Overpass GPS route for the entire corridor; upstream has no mapped road/building context (roads only downstream of latitude -6.44). The sea patch and straight shoreline are illustrative, not surveyed. The channel width and bed are visual assumptions, not hydraulic geometry."
+}

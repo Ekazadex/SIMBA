@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
+    "start": "node --import tsx scripts/start-production.mjs",
     "build": "tsc --noEmit && vite build",
     "test": "node --test tests/*.test.mjs",
     "verify:ciliwung": "node scripts/verify-ciliwung-api-contract.mjs && node scripts/verify-ciliwung-frontend-contract.mjs && node scripts/verify-cupcarbon-integration.mjs && node scripts/verify-ciliwung-regression.mjs"
