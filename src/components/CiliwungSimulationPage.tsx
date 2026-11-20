@@ -109,10 +109,14 @@ export default function CiliwungSimulationPage({
   theme = 'dark',
   language = 'id',
   onExit,
+  backendAvailable = true,
+  onRetryConnection,
 }: {
   theme?: 'light' | 'dark';
   language?: 'id' | 'en';
   onExit: () => void;
+  backendAvailable?: boolean;
+  onRetryConnection?: () => void;
 }) {
   const isDark = theme === 'dark';
   const [selectedMode, setSelectedMode] = useState<SimulationMode>('legacy');
@@ -358,6 +362,10 @@ export default function CiliwungSimulationPage({
   ] : [];
 
   async function request(path: string, body?: Record<string, unknown>) {
+    if (!backendAvailable) {
+      setError(language === 'en' ? 'Simulation backend unavailable.' : 'Backend simulasi belum terhubung.');
+      return null;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -415,7 +423,8 @@ export default function CiliwungSimulationPage({
 
   return (
     <div className={`min-h-[calc(100vh-5rem)] ${isDark ? 'text-slate-200' : 'text-slate-700'} flex flex-col gap-6`}>
-      <section className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} rounded-2xl border p-5 lg:p-7`}>
+      {!backendAvailable && <div role="status" className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-500">{language === 'en' ? 'Simulation backend is offline. Simulation controls are unavailable.' : 'Backend simulasi belum terhubung. Kontrol simulasi belum dapat digunakan.'} <button type="button" onClick={onRetryConnection} className="ml-2 underline font-bold">{language === 'en' ? 'Retry' : 'Coba lagi'}</button></div>}
+      <section className={`${isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200 shadow-sm'} rounded-2xl border p-3 sm:p-5 lg:p-7`}>
         <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-5">
           <div>
             <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.25em] text-[#3B82F6] mb-2">
@@ -504,9 +513,9 @@ export default function CiliwungSimulationPage({
               </span>
             </div>
             <div className="flex gap-2">
-              <button type="button" onClick={handleStart} disabled={busy || isRunning || (selectedMode === 'rain_replay' && !selectedEpisodeId)} className="flex-1 px-3 py-2 rounded-lg bg-[#3B82F6] hover:bg-blue-500 text-black text-xs font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">{isRunning ? 'Running...' : selectedMode === 'rain_replay' ? 'Start Replay' : 'Start Simulation'}</button>
-              <button type="button" onClick={handleStop} disabled={busy || !isRunning} className={`px-3 py-2 rounded-lg border text-xs font-bold cursor-pointer disabled:opacity-50 ${isDark ? 'border-white/10 bg-white/5 hover:bg-white/10' : 'border-slate-200 bg-white hover:bg-slate-100'}`}>Stop</button>
-              <button type="button" onClick={handleReset} disabled={busy} className={`px-3 py-2 rounded-lg border text-xs font-bold cursor-pointer disabled:opacity-50 ${isDark ? 'border-white/10 bg-white/5 hover:bg-white/10' : 'border-slate-200 bg-white hover:bg-slate-100'}`}>Reset</button>
+              <button type="button" onClick={handleStart} disabled={!backendAvailable || busy || isRunning || (selectedMode === 'rain_replay' && !selectedEpisodeId)} className="flex-1 px-3 py-2 rounded-lg bg-[#3B82F6] hover:bg-blue-500 text-black text-xs font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">{isRunning ? 'Running...' : selectedMode === 'rain_replay' ? 'Start Replay' : 'Start Simulation'}</button>
+              <button type="button" onClick={handleStop} disabled={!backendAvailable || busy || !isRunning} className={`px-3 py-2 rounded-lg border text-xs font-bold cursor-pointer disabled:opacity-50 ${isDark ? 'border-white/10 bg-white/5 hover:bg-white/10' : 'border-slate-200 bg-white hover:bg-slate-100'}`}>Stop</button>
+              <button type="button" onClick={handleReset} disabled={!backendAvailable || busy} className={`px-3 py-2 rounded-lg border text-xs font-bold cursor-pointer disabled:opacity-50 ${isDark ? 'border-white/10 bg-white/5 hover:bg-white/10' : 'border-slate-200 bg-white hover:bg-slate-100'}`}>Reset</button>
             </div>
           </div>
         </div>

@@ -1096,10 +1096,10 @@ export default function SCADADashboard({
 
   return (
     <div id="scada-dashboard-root" className="space-y-6 pb-12">
-      <h1 className="text-2xl sm:text-3xl font-bold">{language === 'en' ? 'Monitoring overview' : 'Ringkasan Pemantauan'}</h1>
-      <div id="scada-hardware-pause-banner" role="status" className={`rounded-2xl border p-5 flex flex-wrap items-center justify-between gap-3 ${isDark ? 'bg-slate-800/70 border-slate-700' : 'bg-blue-50 border-blue-100'}`}>
+      <h1 className="text-xl sm:text-3xl font-bold">{language === 'en' ? 'Monitoring overview' : 'Ringkasan Pemantauan'}</h1>
+      <div id="scada-hardware-pause-banner" role="status" className={`rounded-2xl border p-3 sm:p-5 flex flex-wrap items-center justify-between gap-3 ${isDark ? 'bg-slate-800/70 border-slate-700' : 'bg-blue-50 border-blue-100'}`}>
         <div className="flex items-start gap-3"><Info className="w-6 h-6 text-blue-500 shrink-0" /><div>
-          <p className="font-bold text-lg">{!latestReading ? (language === 'en' ? 'Sensor data unavailable' : 'Data sensor belum tersedia') : isDeviceOffline ? (language === 'en' ? 'Sensor offline · last reading' : 'Sensor offline · data terakhir') : (language === 'en' ? 'Sensor data available' : 'Data sensor tersedia')}</p>
+          <p className="font-bold text-base sm:text-lg">{!latestReading ? (language === 'en' ? 'Sensor data unavailable' : 'Data sensor belum tersedia') : isDeviceOffline ? (language === 'en' ? 'Sensor offline · last reading' : 'Sensor offline · data terakhir') : (language === 'en' ? 'Sensor data available' : 'Data sensor tersedia')}</p>
           <p className="text-sm opacity-75">{!latestReading ? (language === 'en' ? 'Waiting for sensor data' : 'Menunggu data dari sensor') : timeAgoText}</p>
           {latestReading && <p className="text-xs opacity-70 mt-1">{language === 'en' ? 'Source' : 'Sumber'}: {latestReading.source || 'Sensor'}</p>}
         </div></div>

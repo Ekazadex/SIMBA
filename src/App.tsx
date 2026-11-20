@@ -36,7 +36,6 @@ import {
   Lock,
   ChevronRight,
   User,
-  ExternalLink,
   Sun,
   Moon,
   Globe,
@@ -52,6 +51,7 @@ export default function App() {
   const [isSimulatedUser, setIsSimulatedUser] = useState(false);
   const [config, setConfig] = useState<SystemConfig | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [simulationConnected, setSimulationConnected] = useState(false);
 
   // Theme Management (Light / Dark mode)
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -302,7 +302,7 @@ export default function App() {
       body: JSON.stringify({ mode }),
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok || payload.success === false) {
+    if (!response.ok || payload.success !== true || payload.mode !== mode) {
       throw new Error(payload.error || `Gagal berpindah ke mode ${mode}.`);
     }
     return payload;
@@ -311,16 +311,22 @@ export default function App() {
   const handleEnterSimulation = async () => {
     try {
       await switchCiliwungMode('simulation');
+      setSimulationConnected(true);
+      setAuthError(null);
       setActiveTab('simulation');
     } catch (error) {
       console.error('Enter simulation mode failed:', error);
-      setAuthError(error instanceof Error ? error.message : 'Gagal masuk mode simulasi.');
+      setSimulationConnected(false);
+      setActiveTab('simulation');
+      setAuthError(language === 'en' ? 'Simulation backend unavailable. Controls are disabled; try again when the backend is connected.' : 'Backend simulasi belum terhubung. Kontrol simulasi dinonaktifkan; coba lagi setelah backend tersedia.');
     }
   };
 
   const handleExitSimulation = async () => {
     try {
-      await switchCiliwungMode('hardware');
+      if (simulationConnected) await switchCiliwungMode('hardware');
+      setSimulationConnected(false);
+      setAuthError(null);
       setActiveTab('dashboard');
     } catch (error) {
       console.error('Return to hardware mode failed:', error);
@@ -472,7 +478,7 @@ export default function App() {
       )}
       
       {/* GLOBAL SCADA CONSOLE TOP NAV BAR */}
-      <nav id="top-nav" className={`border-b ${isDark ? 'border-white/5' : 'border-slate-200'} ${themeNav} backdrop-blur-md sticky top-0 z-50 px-4 lg:px-8 py-3.5 flex flex-col sm:flex-row justify-between items-center gap-4 rounded-t-xl`}>
+      <nav id="top-nav" className={`border-b ${isDark ? 'border-white/5' : 'border-slate-200'} ${themeNav} backdrop-blur-md relative sm:sticky top-0 z-50 px-3 lg:px-8 py-2 sm:py-3.5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 sm:gap-4 rounded-t-xl`}>
         
         {/* BRAND & STATUS HEADER */}
         <div className="flex flex-wrap items-center gap-2.5">
@@ -494,7 +500,7 @@ export default function App() {
         </div>
 
         {/* CONTROLS & AUTH */}
-        <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto justify-end">
+        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2.5 w-full sm:w-auto justify-start sm:justify-end">
           
           {/* LANGUAGE SWITCHER BUTTON (ID / EN) */}
           <button
@@ -554,13 +560,13 @@ export default function App() {
           </button>
 
           {/* TAB CHANGER */}
-          <div className={`flex p-1 border rounded-xl ${
+          <div className={`flex w-full sm:w-auto order-last sm:order-none p-1 border rounded-xl ${
             isDark ? 'bg-white/5 border-white/5' : 'bg-slate-100 border-slate-200'
           }`}>
             <button
               id="tab-dashboard"
               onClick={() => { if (activeTab === 'simulation') void handleExitSimulation(); else setActiveTab('dashboard'); }}
-              className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-semibold tracking-wide transition-all cursor-pointer ${
+              className={`flex flex-1 justify-center items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all cursor-pointer ${
                 activeTab === 'dashboard'
                   ? 'bg-[#3B82F6] text-black font-bold shadow-md'
                   : isDark 
@@ -572,13 +578,13 @@ export default function App() {
               {language === 'en' ? 'Overview' : 'Ringkasan'}
             </button>
 
-            <button id="tab-simulation" onClick={() => { if (activeTab !== 'simulation') void handleEnterSimulation(); }} className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${activeTab === 'simulation' ? 'bg-[#3B82F6] text-black' : 'text-slate-500 hover:text-slate-700'}`}>
+            <button id="tab-simulation" onClick={() => { if (activeTab !== 'simulation') void handleEnterSimulation(); }} className={`flex flex-1 justify-center items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2 rounded-lg text-xs font-semibold transition-all ${activeTab === 'simulation' ? 'bg-[#3B82F6] text-black' : 'text-slate-500 hover:text-slate-700'}`}>
               <Compass className="w-3.5 h-3.5" /> {language === 'en' ? 'Simulation' : 'Simulasi'}
             </button>
             <button
               id="tab-admin"
-              onClick={async () => { if (activeTab === 'simulation') { try { await switchCiliwungMode('hardware'); } catch (error) { setAuthError(error instanceof Error ? error.message : 'Gagal keluar dari mode simulasi.'); return; } } setActiveTab('admin'); }}
-              className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-semibold tracking-wide transition-all cursor-pointer ${
+              onClick={async () => { if (activeTab === 'simulation' && simulationConnected) { try { await switchCiliwungMode('hardware'); } catch (error) { setAuthError(error instanceof Error ? error.message : 'Gagal keluar dari mode simulasi.'); return; } } setSimulationConnected(false); setAuthError(null); setActiveTab('admin'); }}
+              className={`flex flex-1 justify-center items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all cursor-pointer ${
                 activeTab === 'admin'
                   ? 'bg-[#3B82F6] text-black font-bold shadow-md'
                   : isDark 
@@ -694,21 +700,20 @@ export default function App() {
             <span>{authError}</span>
           </div>
           <button 
-            onClick={() => window.open(window.location.href, '_blank')}
+            onClick={() => setAuthError(null)}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-[10px] cursor-pointer ${
               isDark 
                 ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300' 
                 : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-600 shadow-sm'
             }`}
           >
-            {language === 'en' ? 'Open in New Tab' : 'Buka Tab Baru'}
-            <ExternalLink className="w-3 h-3" />
+            {language === 'en' ? 'Dismiss' : 'Tutup'}
           </button>
         </div>
       )}
 
       {/* CORE WORKSPACE CONTENT AREA */}
-      <main id="main-content" className="flex-grow p-4 lg:p-8 max-w-7xl mx-auto w-full">
+      <main id="main-content" className="flex-grow p-3 sm:p-4 lg:p-8 max-w-7xl mx-auto w-full min-w-0">
         {activeTab === 'dashboard' ? (
           <SCADADashboard 
             config={config} 
@@ -743,7 +748,7 @@ export default function App() {
             onResetSimulation={handleResetSimulation}
           />
         ) : (
-          <CiliwungSimulationPage theme={theme} language={language} onExit={handleExitSimulation} />
+          <CiliwungSimulationPage theme={theme} language={language} onExit={handleExitSimulation} backendAvailable={simulationConnected} onRetryConnection={handleEnterSimulation} />
         )}
       </main>
 
