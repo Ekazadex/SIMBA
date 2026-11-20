@@ -39,6 +39,8 @@ import {
   Sun,
   Moon,
   Globe,
+  Menu,
+  X,
   Volume2,
   VolumeX
 } from 'lucide-react';
@@ -52,6 +54,7 @@ export default function App() {
   const [config, setConfig] = useState<SystemConfig | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [simulationConnected, setSimulationConnected] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Theme Management (Light / Dark mode)
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -334,6 +337,20 @@ export default function App() {
     }
   };
 
+  const handleOpenAdmin = async () => {
+    if (activeTab === 'simulation' && simulationConnected) {
+      try {
+        await switchCiliwungMode('hardware');
+      } catch (error) {
+        setAuthError(error instanceof Error ? error.message : 'Gagal keluar dari mode simulasi.');
+        return;
+      }
+    }
+    setSimulationConnected(false);
+    setAuthError(null);
+    setActiveTab('admin');
+  };
+
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [inputUsername, setInputUsername] = useState('');
   const [inputPassword, setInputPassword] = useState('');
@@ -477,8 +494,36 @@ export default function App() {
         />
       )}
       
+      {/* MOBILE NAVIGATION */}
+      <nav aria-label={language === 'en' ? 'Mobile navigation' : 'Navigasi ponsel'} className={`sm:hidden relative z-50 border-b ${isDark ? 'border-white/5' : 'border-slate-200'} ${themeNav}`}>
+        <div className="flex items-center justify-between gap-3 px-4 py-3">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <Activity className="h-4 w-4 shrink-0 text-[#3B82F6]" />
+            <span className={`text-[11px] font-bold uppercase tracking-[0.2em] ${isDark ? 'text-white' : 'text-slate-800'}`}>SIMBA RTU COMM v2.1</span>
+          </div>
+          <button type="button" aria-label={mobileMenuOpen ? (language === 'en' ? 'Close menu' : 'Tutup menu') : (language === 'en' ? 'Open menu' : 'Buka menu')} aria-expanded={mobileMenuOpen} aria-controls="mobile-menu" onClick={() => setMobileMenuOpen(!mobileMenuOpen)} className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border ${isDark ? 'border-white/10 bg-white/5 text-slate-200' : 'border-slate-200 bg-white text-slate-700'}`}>
+            {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+          </button>
+        </div>
+        {mobileMenuOpen && <div id="mobile-menu" className={`max-h-[calc(100dvh-4rem)] overflow-y-auto border-t px-4 pb-4 pt-3 ${isDark ? 'border-white/10 bg-[#0D0D0F]' : 'border-slate-200 bg-white'}`}>
+          <div className="grid gap-1">
+            <button type="button" aria-current={activeTab === 'dashboard' ? 'page' : undefined} onClick={() => { setMobileMenuOpen(false); if (activeTab === 'simulation') void handleExitSimulation(); else setActiveTab('dashboard'); }} className={`flex items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-semibold ${activeTab === 'dashboard' ? 'bg-blue-500 text-white' : 'hover:bg-slate-500/10'}`}><LayoutDashboard className="h-4 w-4" />{language === 'en' ? 'Overview' : 'Ringkasan'}</button>
+            <button type="button" aria-current={activeTab === 'simulation' ? 'page' : undefined} onClick={() => { setMobileMenuOpen(false); if (activeTab !== 'simulation') void handleEnterSimulation(); }} className={`flex items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-semibold ${activeTab === 'simulation' ? 'bg-blue-500 text-white' : 'hover:bg-slate-500/10'}`}><Compass className="h-4 w-4" />{language === 'en' ? 'Simulation' : 'Simulasi'}</button>
+            <button type="button" aria-current={activeTab === 'admin' ? 'page' : undefined} onClick={() => { setMobileMenuOpen(false); void handleOpenAdmin(); }} className={`flex items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-semibold ${activeTab === 'admin' ? 'bg-blue-500 text-white' : 'hover:bg-slate-500/10'}`}><ShieldCheck className="h-4 w-4" />{language === 'en' ? 'Settings' : 'Pengaturan'}</button>
+          </div>
+          <div className={`mt-3 grid gap-1 border-t pt-3 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
+            <button type="button" onClick={toggleLanguage} className="flex items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-semibold hover:bg-slate-500/10"><Globe className="h-4 w-4" /><span>{language === 'en' ? 'Language' : 'Bahasa'}</span><span className="ml-auto text-blue-500">{language === 'id' ? 'ID / EN' : 'EN / ID'}</span></button>
+            <button type="button" onClick={handleToggleSound} className="flex items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-semibold hover:bg-slate-500/10">{soundEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}<span>{language === 'en' ? 'Sound' : 'Suara'}</span><span className="ml-auto text-xs opacity-70">{soundEnabled ? (language === 'en' ? 'On' : 'Aktif') : (language === 'en' ? 'Off' : 'Mati')}</span></button>
+            <button type="button" onClick={toggleTheme} className="flex items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-semibold hover:bg-slate-500/10">{isDark ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}<span>{language === 'en' ? 'Appearance' : 'Tampilan'}</span><span className="ml-auto text-xs opacity-70">{isDark ? (language === 'en' ? 'Dark' : 'Gelap') : (language === 'en' ? 'Light' : 'Terang')}</span></button>
+          </div>
+          <div className={`mt-3 border-t pt-3 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
+            <button type="button" onClick={() => { setMobileMenuOpen(false); if (user) handleLogout(); else { setLoginError(null); setIsLoginModalOpen(true); } }} className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-500 px-3 py-3 text-sm font-bold text-white">{user ? <LogOut className="h-4 w-4" /> : <LogIn className="h-4 w-4" />}{user ? (language === 'en' ? 'Log out' : 'Keluar') : 'Login Admin PLC'}</button>
+          </div>
+        </div>}
+      </nav>
+
       {/* GLOBAL SCADA CONSOLE TOP NAV BAR */}
-      <nav id="top-nav" className={`border-b ${isDark ? 'border-white/5' : 'border-slate-200'} ${themeNav} backdrop-blur-md relative sm:sticky top-0 z-50 px-3 lg:px-8 py-2 sm:py-3.5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 sm:gap-4 rounded-t-xl`}>
+      <nav id="top-nav" className={`hidden sm:flex border-b ${isDark ? 'border-white/5' : 'border-slate-200'} ${themeNav} backdrop-blur-md relative sm:sticky top-0 z-50 px-3 lg:px-8 py-2 sm:py-3.5 flex-col sm:flex-row justify-between items-start sm:items-center gap-2 sm:gap-4 rounded-t-xl`}>
         
         {/* BRAND & STATUS HEADER */}
         <div className="flex flex-wrap items-center gap-2.5">
@@ -583,7 +628,7 @@ export default function App() {
             </button>
             <button
               id="tab-admin"
-              onClick={async () => { if (activeTab === 'simulation' && simulationConnected) { try { await switchCiliwungMode('hardware'); } catch (error) { setAuthError(error instanceof Error ? error.message : 'Gagal keluar dari mode simulasi.'); return; } } setSimulationConnected(false); setAuthError(null); setActiveTab('admin'); }}
+              onClick={() => void handleOpenAdmin()}
               className={`flex flex-1 justify-center items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all cursor-pointer ${
                 activeTab === 'admin'
                   ? 'bg-[#3B82F6] text-black font-bold shadow-md'
@@ -659,9 +704,9 @@ export default function App() {
           isDark 
             ? 'bg-slate-900/80 border-b border-white/10 text-slate-400' 
             : 'bg-slate-100 border-b border-slate-300 text-slate-600'
-        } text-[11px] px-4 py-2 flex items-center justify-center gap-2 text-center font-mono uppercase tracking-wider`}>
-          <span className="w-2 h-2 rounded-full bg-slate-400 inline-block" />
-          <span className={`font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+        } text-[10px] sm:text-[11px] px-4 py-2 hidden sm:flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-center font-mono uppercase sm:tracking-wider`}>
+          <span className="w-2 h-2 shrink-0 rounded-full bg-slate-400 inline-block" />
+          <span className={`font-bold whitespace-nowrap ${isDark ? 'text-white' : 'text-slate-800'}`}>
             {language === 'en' ? '[ STATUS: OFFLINE ] :' : '[ STATUS OFFLINE ] :'}
           </span>
           <span>
