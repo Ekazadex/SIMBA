@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#101916">
+  <title>Ciliwung · Simulasi Interaktif 3D</title>
+  <link rel="stylesheet" href="./src/css/app.css?v=20261107-location-names">
+  <style>
+    .embed-toolbar { display: none; }
+    body.embed-dashboard .embed-toolbar { display: flex; position: absolute; left: 12px; bottom: 12px; z-index: 30; gap: 8px; pointer-events: auto; }
+    .embed-toolbar button { border: 1px solid #ffffff55; border-radius: 9px; background: #12241fee; color: #eff4eb; padding: 9px 12px; font-size: 12px; font-weight: 700; cursor: pointer; }
+    body.embed-dashboard .map-panel { left: 12px; right: auto; top: 48px; width: min(270px, calc(100vw - 24px)); max-height: calc(100vh - 112px); overflow-y: auto; }
+    body.embed-dashboard .map-wrap { width: min(100%, 230px); height: clamp(190px, 38vh, 300px) !important; min-height: 0; aspect-ratio: auto; }
+    body.embed-dashboard .status-panel { right: 12px; left: auto; top: 48px; bottom: auto; width: min(290px, calc(100vw - 24px)); max-width: none; max-height: calc(100vh - 112px); overflow-y: auto; }
+    body.embed-dashboard .station-row:nth-child(n) { display: grid; }
+    body.embed-dashboard .backend-mode-banner { top: 10px; max-width: calc(100vw - 24px); text-align: center; font-size: 9px; }
+    @media (max-width: 600px) { body.embed-dashboard .map-panel, body.embed-dashboard .status-panel { left: 12px; right: auto; top: 48px; width: min(290px, calc(100vw - 24px)); } }
+    .forecast-card[hidden], .forecast-card [hidden] { display: none !important; }
+    .backend-simulation-mode .status-panel { max-height: calc(100vh - 36px); overflow-y: auto; }
+    @media (min-width: 601px) { .backend-simulation-mode .map-panel { left: 18px; right: auto; } }
+    .forecast-card { margin-top: 13px; padding: 12px; border: 1px dashed #ffca7b99; border-radius: 12px; background: #442918cc; color: #ffe9c5; }
+    .forecast-badge { font-size: 11px; font-weight: 800; letter-spacing: .06em; color: #ffce86; }
+    .forecast-card p { margin: 8px 0; font-size: 11px; }
+    .forecast-rows { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin: 9px 0; }
+    .forecast-row { min-width: 0; padding: 8px; border-radius: 8px; border: 1px solid #ffca7b55; background: #241b19bb; font-size: 11px; }
+    .forecast-row strong { display: block; font-size: 16px; font-variant-numeric: tabular-nums; }
+    .forecast-row span { display: block; font-size: 10px; line-height: 1.35; }
+    .forecast-card small { display: block; font-size: 10px; line-height: 1.4; color: #eed3ae; }
+    .backend-sim-clock[hidden] { display: none !important; }
+    .backend-sim-clock { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 10px; padding: 6px 8px; border: 1px solid #76c8ee66; border-radius: 8px; background: #102a3699; color: #bcecff; font-size: 11px; }
+    .backend-sim-clock strong { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  </style>
+  <link rel="icon" type="image/svg+xml" href="./assets/map/favicon.svg">
+</head>
+<body>
+  <canvas id="scene" aria-label="Visualisasi 3D terrain, sungai, dan sembilan titik sensor Ciliwung"></canvas>
+  <div id="loading" class="loading"><span class="spinner"></span><span id="loading-text">Memuat terrain, sungai, dan node sensor…</span></div>
+  <div id="error-banner" class="error-banner" hidden></div>
+
+  <main id="hud" class="hud" hidden>
+    <div id="backend-mode-banner" class="backend-mode-banner" hidden>MODE BACKEND AKTIF · DATA DARI SIMBA CILIWUNG</div>
+    <section class="panel control-panel" aria-label="Kontrol simulasi">
+      <div class="brand-row"><div class="brand-mark">C</div><div><h1>Ciliwung · Flood Explorer</h1><p class="subtitle">Sembilan lokasi · Puncak → Manggarai · hujan demo</p></div></div>
+      <div class="panel-heading"><span>Curah hujan per wilayah</span><span class="unit">mm/jam</span></div>
+      <div id="rain-controls" class="rain-controls"></div>
+      <div class="button-row presets">
+        <button type="button" class="button button-secondary" data-preset="upstream">Hujan hulu</button>
+        <button type="button" class="button button-secondary" data-preset="basin">Hujan merata</button>
+        <button type="button" class="button button-quiet" data-preset="clear">Kering</button>
+      </div>
+      <div class="button-row simulation-controls">
+        <button type="button" class="button button-primary" id="play-button">▶ Mulai simulasi</button>
+        <button type="button" class="button button-quiet" id="reset-button">Reset</button>
+      </div>
+      <label class="speed-control" for="speed-select"><span>Kecepatan simulasi</span>
+        <select id="speed-select"><option value="10">10×</option><option value="30" selected>30×</option><option value="60">60×</option></select>
+      </label>
+      <div class="clock-row"><span>Waktu simulasi</span><strong id="sim-time">00:00</strong></div>
+      <div class="note"><strong>Model konseptual N1–N5.</strong> UP1–UP4 adalah lokasi geografis dengan air dasar visual, bukan node hujan pada model mandiri. Parameter memakai asumsi demo tetap, belum dikalibrasi. Muka air channel dibatasi crest; spill melebar dengan heuristik visual, bukan hidraulika. Pantai Laut Jawa disederhanakan. Visual ini bukan prediksi banjir atau hasil HEC‑RAS.</div>
+    </section>
+
+    <div class="embed-toolbar" aria-label="Kontrol tampilan 3D">
+      <button id="embed-map-toggle" type="button" aria-expanded="false" aria-controls="embed-map-panel">Peta lokasi</button>
+      <button id="embed-status-toggle" type="button" aria-expanded="false" aria-controls="embed-status-panel">Detail stasiun</button>
+    </div>
+    <section id="embed-map-panel" class="panel map-panel" aria-label="Peta area dan navigasi node">
+      <div class="map-heading"><strong>Peta area</strong><div class="map-actions"><button id="map-fit-button" class="map-fit-button" type="button" aria-label="Tampilkan seluruh koridor pada peta">Pas semua</button><button id="sea-view-button" class="sea-view-button" type="button" aria-label="Jelajahi muara Ciliwung dan Laut Jawa">Lihat muara</button></div></div>
+      <div id="map-wrap" class="map-wrap" role="region" tabindex="0" aria-label="Peta koridor. Seret ke atas atau bawah untuk berpindah wilayah.">
+        <div id="map-content" class="map-content">
+          <img id="area-map" loading="lazy" decoding="async" src="./assets/map/area_overview.png" alt="Peta lokal koridor Ciliwung dari Puncak melalui Depok dan Manggarai sampai muara Laut Jawa, dengan rute OSM/Overpass dan relief SRTM; garis pantai disederhanakan">
+          <div id="map-markers" class="map-markers"></div>
+        </div>
+      </div>
+      <div class="map-attribution">© OpenStreetMap contributors · ODbL · Relief SRTM</div>
+    </section>
+
+    <section id="embed-status-panel" class="panel status-panel" aria-label="Status node dan pembacaan simulasi">
+      <div class="status-heading"><div><span class="eyebrow">STASIUN TERPILIH</span><h2 id="selected-name">Pos Depok</h2></div></div>
+      <div class="selected-readings"><div><span>Elevasi tanah</span><strong id="selected-elevation">—</strong></div><div><span>Kenaikan muka air model</span><strong id="selected-stage">0.00 m</strong></div><div id="current-tma-reading" hidden><span>TMA saat ini · backend</span><strong id="selected-tma">—</strong></div></div>
+      <div id="backend-sim-clock" class="backend-sim-clock" hidden><span>Waktu simulasi</span><strong id="backend-sim-time">00:00:00</strong></div>
+      <section id="forecast-panel" class="forecast-card" aria-label="Prakiraan eksperimental berbasis data sintetik" hidden>
+        <div class="forecast-badge">PREDIKSI · SYNTHETIC DEMO</div>
+        <p><strong id="forecast-node">Pos Depok</strong> · TMA absolut (cm), bukan kenaikan mesh.</p>
+        <p id="forecast-unavailable" role="status">Prediksi tidak tersedia untuk node ini.</p>
+        <div id="forecast-results" hidden>
+          <div class="forecast-rows">
+            <div class="forecast-row"><b>+30 menit</b><strong id="forecast-30-level">—</strong><span id="forecast-30-crossing">—</span></div>
+            <div class="forecast-row"><b>+60 menit</b><strong id="forecast-60-level">—</strong><span id="forecast-60-crossing">—</span></div>
+          </div>
+          <small id="forecast-issue">—</small>
+          <small id="forecast-method">—</small>
+        </div>
+        <small>Menit simulasi · prediksi berbasis data sintetik, belum tervalidasi sebagai peringatan banjir. Air biru pada peta adalah kondisi saat ini, bukan proyeksi genangan.</small>
+      </section>
+      <div class="station-list" id="station-list"></div>
+      <p class="hint">Seret untuk orbit · scroll untuk zoom · klik kanan untuk geser</p>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </main>
+  <script>
+    if (new URLSearchParams(location.search).get('embed') === 'dashboard') {
+      document.body.classList.add('embed-dashboard');
+      const panels = [document.getElementById('embed-map-panel'), document.getElementById('embed-status-panel')];
+      const buttons = [document.getElementById('embed-map-toggle'), document.getElementById('embed-status-toggle')];
+      panels.forEach(panel => { panel.hidden = true; });
+      let focusedMap = false;
+      buttons.forEach((button, index) => button.addEventListener('click', () => {
+        const open = panels[index].hidden;
+        panels.forEach((panel, i) => { panel.hidden = i !== index || !open; buttons[i].setAttribute('aria-expanded', String(i === index && open)); });
+        requestAnimationFrame(() => {
+          window.dispatchEvent(new Event('resize'));
+          if (index === 0 && open && !focusedMap) { window.dispatchEvent(new Event('embed-focus-map')); focusedMap = true; }
+        });
+      }));
+    }
+  </script>
+  <script type="module" src="./src/js/app.js?v=20261120-v3"></script>
+</body>
+</html>

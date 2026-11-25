@@ -15,8 +15,9 @@
 # 2. Service Account Keys & Cloud Credentials
 *service-account*.json
 *credentials*.json
-firebase-applet-config.json
-firebase*.json
+# Pastikan file konfigurasi Firebase AI Studio selalu dipertahankan dan tidak pernah diabaikan/dihapus saat sinkronisasi workspace
+!firebase-applet-config.json
+!firebase-blueprint.json
 *.pem
 *.key
 *.cert

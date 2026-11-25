@@ -1,0 +1,38 @@
+{
+  "encoding": "int16-le",
+  "width": 408,
+  "height": 920,
+  "bounds": {
+    "west": 106.75,
+    "east": 106.99,
+    "south": -6.72,
+    "north": -6.08
+  },
+  "stepLongitude": 0.0005896805896805771,
+  "stepLatitude": 0.000696409140369967,
+  "units": "metres above source DEM vertical datum (not a surveyed water level)",
+  "source": "SRTM 1 arc-second GeoTIFF, WGS 84 geographic coordinates",
+  "sourcePathAtBuild": "D:\\Documents\\Semester7\\Despro2\\hec_ras\\terrain\\s07_e106_1arc_v3.tif",
+  "sourceCropPixelBox": [
+    2700,
+    288,
+    3565,
+    2593
+  ],
+  "sourceElevationRangeM": [
+    -55,
+    1800
+  ],
+  "nodeSourceSamplesM": [
+    983,
+    339,
+    178,
+    109,
+    70,
+    53,
+    25,
+    17,
+    11
+  ],
+  "verticalExaggeration": 1.8
+}

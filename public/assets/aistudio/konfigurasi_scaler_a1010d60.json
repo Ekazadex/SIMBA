@@ -1,0 +1,23 @@
+{
+    "sklearn_version": "unknown",
+    "feature_range": [
+        0,
+        1
+    ],
+    "n_features_in": 1,
+    "data_min": [
+        129.56
+    ],
+    "data_max": [
+        420.0
+    ],
+    "data_range": [
+        290.44
+    ],
+    "scale": [
+        0.003443051921222972
+    ],
+    "min": [
+        -0.44608180691364824
+    ]
+}

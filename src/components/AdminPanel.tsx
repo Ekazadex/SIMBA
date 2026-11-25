@@ -8,6 +8,7 @@ import { db, auth, handleFirestoreError, OperationType } from '../firebaseConfig
 import { doc, setDoc, updateDoc, collection, addDoc, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
 import { SystemConfig, SystemLog, SensorReading } from '../types';
 import { normalizeSensorReading } from '../utils/readingUtils';
+import { apiUrl } from '../utils/apiBase';
 import { 
   Sliders, 
   Play, 
@@ -61,7 +62,7 @@ interface AdminPanelProps {
   onLogin?: (user: any) => void;
   latestReading?: SensorReading | null;
   language?: 'id' | 'en';
-  onNavigateTab?: (tab: 'dashboard' | 'admin') => void;
+  onNavigateTab?: (tab: 'dashboard' | 'simulation' | 'admin') => void;
   onResetSimulation?: () => Promise<void>;
 }
 
@@ -93,7 +94,7 @@ export default function AdminPanel({
 
   // Real-time latest sensor telemetry & batch data listener for Inspector (Shared from App state to save quota)
   const [latestReading, setLatestReading] = useState<SensorReading | null>(propLatestReading ?? null);
-  const [timeAgoText, setTimeAgoText] = useState<string>('Menunggu data...');
+  const [timeAgoText, setTimeAgoText] = useState<string>(language === 'en' ? 'Awaiting telemetry...' : 'Menunggu data...');
 
   useEffect(() => {
     if (propLatestReading !== undefined) {
@@ -207,7 +208,11 @@ export default function AdminPanel({
     e.preventDefault();
     setLoginError(null);
     if (!adminCreds) {
-      setLoginError('Sistem otentikasi sedang sinkronisasi. Harap tunggu sebentar.');
+      setLoginError(
+        language === 'en'
+          ? 'Authentication service is syncing. Please wait a moment.'
+          : 'Sistem otentikasi sedang sinkronisasi. Harap tunggu sebentar.'
+      );
       return;
     }
 
@@ -237,7 +242,11 @@ export default function AdminPanel({
       setLoginUsername('');
       setLoginPassword('');
     } else {
-      setLoginError('Nama pengguna atau kata sandi salah. Silakan coba lagi.');
+      setLoginError(
+        language === 'en'
+          ? 'Invalid username or password. Please try again.'
+          : 'Nama pengguna atau kata sandi salah. Silakan coba lagi.'
+      );
     }
   };
 
@@ -248,17 +257,21 @@ export default function AdminPanel({
     if (!adminCreds) return;
 
     if (currentPassword !== adminCreds.password) {
-      setCredChangeError('Kata sandi saat ini tidak valid.');
+      setCredChangeError(language === 'en' ? 'Current password is invalid.' : 'Kata sandi saat ini tidak valid.');
       return;
     }
 
     if (newPassword.length < 6) {
-      setCredChangeError('Kata sandi baru minimal harus 6 karakter.');
+      setCredChangeError(
+        language === 'en' ? 'New password must be at least 6 characters.' : 'Kata sandi baru minimal harus 6 karakter.'
+      );
       return;
     }
 
     if (newPassword !== confirmNewPassword) {
-      setCredChangeError('Konfirmasi kata sandi baru tidak cocok.');
+      setCredChangeError(
+        language === 'en' ? 'New password confirmation does not match.' : 'Konfirmasi kata sandi baru tidak cocok.'
+      );
       return;
     }
 
@@ -271,15 +284,26 @@ export default function AdminPanel({
         last_updated: Date.now()
       });
       
-      setCredChangeSuccess('Kredensial administrator berhasil diperbarui di Firestore.');
-      await appendConsoleLog('Kredensial keamanan administrator PLC berhasil diperbarui.', 'info');
+      setCredChangeSuccess(
+        language === 'en'
+          ? 'Administrator credentials updated in Cloud Firestore.'
+          : 'Kredensial administrator berhasil diperbarui di Firestore.'
+      );
+      await appendConsoleLog(
+        language === 'en'
+          ? 'PLC administrator security credentials updated.'
+          : 'Kredensial keamanan administrator PLC berhasil diperbarui.',
+        'info'
+      );
       setCurrentPassword('');
       setNewPassword('');
       setConfirmNewPassword('');
       setNewUsername('');
     } catch (err) {
       console.error(err);
-      setCredChangeError('Gagal memperbarui kredensial keamanan.');
+      setCredChangeError(
+        language === 'en' ? 'Failed to update security credentials.' : 'Gagal memperbarui kredensial keamanan.'
+      );
     } finally {
       setIsSavingCreds(false);
     }
@@ -289,7 +313,7 @@ export default function AdminPanel({
   const themeCard = isDark ? 'bg-[#0D0D0F] border-white/5' : 'bg-white border-slate-200/80 shadow-sm text-slate-800';
   const themeSubtext = isDark ? 'text-white/50' : 'text-slate-500';
   const themeLabel = isDark ? 'text-white/40' : 'text-slate-400';
-  const themeBorder = isDark ? 'border-white/5' : 'border-slate-150';
+  const themeBorder = isDark ? 'border-white/5' : 'border-slate-200';
   const themeInputTrack = isDark ? 'bg-white/5' : 'bg-slate-200';
   const themeInnerCard = isDark ? 'bg-black/30 border-white/5' : 'bg-slate-50 border-slate-200';
   const themeButtonWhite = isDark 
@@ -310,10 +334,10 @@ export default function AdminPanel({
 
   // Manual Peil Schaal field observation state
   const [manualTma, setManualTma] = useState<number>(45);
-  const [manualWeather, setManualWeather] = useState<string>('Berawan');
+  const [manualWeather, setManualWeather] = useState<'sunny' | 'cloudy' | 'moderate_rain' | 'heavy_rain'>('cloudy');
   const [manualReason, setManualReason] = useState<string>('Sensor Terhalang Sampah / Ranting');
   const [manualOperator, setManualOperator] = useState<string>(user?.displayName || 'Petugas Lapangan Pos Kukusan');
-  const [manualNotes, setManualNotes] = useState<string>('Pengamatan visual mistar peil schaal dermaga akibat sensor ultrasonik terkendala.');
+  const [manualNotes, setManualNotes] = useState<string>('');
   const [isSubmittingManual, setIsSubmittingManual] = useState<boolean>(false);
   const [manualSubmitResult, setManualSubmitResult] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [recentPeilEntries, setRecentPeilEntries] = useState<any[]>([]);
@@ -363,8 +387,8 @@ export default function AdminPanel({
         operator: manualOperator.trim() || 'Petugas Lapangan',
         notes: `[${manualReason}] ${manualNotes.trim()}`,
         temperature: 28.0,
-        humidity: manualWeather.includes('Hujan') ? 88.0 : 72.0,
-        local_rain: manualWeather.includes('Deras') ? 2 : manualWeather.includes('Hujan') ? 1 : 0,
+        humidity: manualWeather === 'moderate_rain' || manualWeather === 'heavy_rain' ? 88.0 : 72.0,
+        local_rain: manualWeather === 'heavy_rain' ? 2 : manualWeather === 'moderate_rain' ? 1 : 0,
         node_id: config?.node_id || 'node-kukusan-01'
       });
 
@@ -376,14 +400,23 @@ export default function AdminPanel({
         message: `[INPUT PEIL SCHAAL] Petugas ${manualOperator} mencatat TMA: ${tmaVal} cm (${status}). Alasan: ${manualReason}`
       });
 
+      const statusText =
+        status === 'Bahaya'
+          ? (language === 'en' ? 'Danger' : 'Bahaya')
+          : status === 'Siaga'
+            ? (language === 'en' ? 'Alert' : 'Siaga')
+            : 'Normal';
+
       setManualSubmitResult({
-        text: `Data Peil Schaal (${tmaVal} cm - Status: ${status}) berhasil dicatat ke sistem! Badge "MANUAL PEIL SCHAAL" kini aktif di Dashboard.`,
+        text: language === 'en'
+          ? `Peil Schaal reading (${tmaVal} cm - Status: ${statusText}) saved! The "MANUAL PEIL" badge is now active on the Dashboard.`
+          : `Data Peil Schaal (${tmaVal} cm - Status: ${statusText}) berhasil dicatat ke sistem! Badge "MANUAL PEIL" kini aktif di Dashboard.`,
         type: 'success'
       });
     } catch (err: any) {
       console.error(err);
       setManualSubmitResult({
-        text: 'Gagal mencatat data manual: ' + err.message,
+        text: (language === 'en' ? 'Failed to save manual entry: ' : 'Gagal mencatat data manual: ') + err.message,
         type: 'error'
       });
     } finally {
@@ -440,7 +473,7 @@ export default function AdminPanel({
       await appendConsoleLog(`Konfigurasi ambang batas diperbarui: Siaga=${thresholdSiaga}cm, Bahaya=${thresholdBahaya}cm, Ref=${refHeight}cm`, 'info');
       
       // Request express server to immediately inject a matching simulated reading with the new config
-      await fetch('/api/sim-data', {
+      await fetch(apiUrl('/api/sim-data'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: simMode })
@@ -467,7 +500,7 @@ export default function AdminPanel({
           : `Memulai Skenario Manual: ${scenario === 'heavy_rain_flood' ? 'Hujan Deras -> Banjir Tinggi' : 'Surut Normal'} (Auto-Stop saat target tercapai)...`,
         'warn'
       );
-      const res = await fetch('/api/sim-data/scenario', {
+      const res = await fetch(apiUrl('/api/sim-data/scenario'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ scenario, action: 'start' })
@@ -496,7 +529,7 @@ export default function AdminPanel({
       const cfgRef = doc(db, 'system_config', config?.node_id || 'node-kukusan-01');
       await setDoc(cfgRef, { auto_simulation: true, last_updated: Date.now() }, { merge: true }).catch(console.error);
 
-      const res = await fetch('/api/sim-data', {
+      const res = await fetch(apiUrl('/api/sim-data'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ water_level: level, mode: 'custom' })
@@ -529,7 +562,7 @@ export default function AdminPanel({
       if (onResetSimulation) {
         await onResetSimulation();
       } else {
-        await fetch('/api/sim-data/reset', { method: 'POST' });
+        await fetch(apiUrl('/api/sim-data/reset'), { method: 'POST' });
       }
       await appendConsoleLog(
         language === 'en'
@@ -549,7 +582,7 @@ export default function AdminPanel({
 
   const handleStopScenario = async () => {
     try {
-      await fetch('/api/sim-data/scenario', {
+      await fetch(apiUrl('/api/sim-data/scenario'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'stop' })
@@ -619,11 +652,11 @@ export default function AdminPanel({
   // If user is not logged in, show elegant auth block
   if (!user) {
     return (
-      <div id="admin-auth-lock" className={`max-w-md mx-auto my-12 ${isDark ? 'bg-[#0D0D0F] border-white/5 text-white' : 'bg-white border-slate-200 text-slate-800 shadow-lg'} rounded-2xl p-8 animate-fade-in`}>
-        <div className={`w-16 h-16 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-100 border-slate-200'} text-[#3B82F6] rounded-full flex items-center justify-center mx-auto mb-5`}>
+      <div id="admin-auth-lock" className={`max-w-md mx-auto my-8 sm:my-12 border ${isDark ? 'bg-[#0D0D0F] border-white/10 text-white' : 'bg-white border-slate-200 text-slate-800 shadow-lg'} rounded-2xl p-6 sm:p-8 animate-fade-in`}>
+        <div className={`w-16 h-16 border ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-100 border-slate-200'} text-[#3B82F6] rounded-full flex items-center justify-center mx-auto mb-5`}>
           <Lock className="w-6 h-6 animate-pulse" />
         </div>
-        <h2 className={`font-bold text-2xl text-center ${isDark ? 'text-white' : 'text-slate-900'} mb-2`}>
+        <h2 className={`font-bold text-xl sm:text-2xl text-center ${isDark ? 'text-white' : 'text-slate-900'} mb-2`}>
           {language === 'en' ? 'PLC Administrator Authentication' : 'Otentikasi Administrator PLC'}
         </h2>
         <p className={`font-sans text-xs text-center ${isDark ? 'text-white/50' : 'text-slate-500'} mb-6 leading-relaxed`}>
@@ -635,7 +668,9 @@ export default function AdminPanel({
         {/* Custom Login Form */}
         <form onSubmit={handleCustomLoginSubmit} className="space-y-4">
           <div className="flex flex-col gap-1.5 text-left">
-            <label className={`text-[10px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>Username</label>
+            <label className={`text-[10px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>
+              {language === 'en' ? 'Username' : 'Nama Pengguna (Username)'}
+            </label>
             <input 
               type="text" 
               value={loginUsername}
@@ -651,7 +686,9 @@ export default function AdminPanel({
           </div>
 
           <div className="flex flex-col gap-1.5 text-left">
-            <label className={`text-[10px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>Password</label>
+            <label className={`text-[10px] font-mono font-bold uppercase tracking-wider ${themeLabel}`}>
+              {language === 'en' ? 'Password' : 'Kata Sandi (Password)'}
+            </label>
             <input 
               type="password" 
               value={loginPassword}
@@ -689,18 +726,18 @@ export default function AdminPanel({
       <div className="col-span-12 lg:col-span-7 flex flex-col gap-6">
         
         {/* Card 1: Calibration & Threshold Settings */}
-        <div id="admin-settings-card" className={`${themeCard} rounded-2xl p-6 border ${themeBorder} flex flex-col justify-between`}>
+        <div id="admin-settings-card" className={`${themeCard} rounded-2xl p-4 sm:p-6 border ${themeBorder} flex flex-col justify-between`}>
           <div>
-            <div className={`flex items-center justify-between mb-6 pb-4 border-b ${isDark ? 'border-white/5' : 'border-slate-100'}`}>
-              <div className="flex items-center gap-3">
-                <div className={`p-2 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-150 border-slate-200'} rounded-lg text-[#3B82F6]`}>
+            <div className={`flex flex-wrap items-center justify-between gap-2 mb-6 pb-4 border-b ${themeBorder}`}>
+              <div className="flex items-center gap-3 min-w-0">
+                <div className={`p-2 border shrink-0 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-100 border-slate-200'} rounded-lg text-[#3B82F6]`}>
                   <Settings className="w-4 h-4" />
                 </div>
-                <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                <h3 className={`font-bold text-lg sm:text-xl leading-snug ${isDark ? 'text-white' : 'text-slate-900'}`}>
                   {language === 'en' ? 'Calibration & Threshold Configuration' : 'Kalibrasi & Konfigurasi Ambang'}
                 </h3>
               </div>
-              <div className={`flex items-center gap-1.5 ${isDark ? 'bg-white/5 border-white/10 text-white/60' : 'bg-slate-100 border-slate-200 text-slate-600'} px-2.5 py-1 rounded text-[9px] font-mono tracking-widest uppercase`}>
+              <div className={`flex items-center gap-1.5 shrink-0 border ${isDark ? 'bg-white/5 border-white/10 text-white/60' : 'bg-slate-100 border-slate-200 text-slate-600'} px-2.5 py-1 rounded text-[9px] font-mono tracking-widest uppercase`}>
                 <ShieldCheck className="w-3.5 h-3.5 text-[#3B82F6]" />
                 ADMIN
               </div>
@@ -709,14 +746,14 @@ export default function AdminPanel({
             <div className="space-y-6">
               {/* Reference Height configuration */}
               <div className="flex flex-col gap-2">
-                <label className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeLabel} font-mono flex justify-between`}>
+                <label className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeLabel} font-mono flex justify-between gap-2`}>
                   <span>{language === 'en' ? 'Zero Reference Baseline (H_REF)' : 'Tinggi Referensi Nol (Baseline)'}</span>
-                  <span className="text-[#3B82F6] font-semibold">{refHeight} cm</span>
+                  <span className="text-[#3B82F6] font-semibold shrink-0">{refHeight} cm</span>
                 </label>
                 <p className={`text-[11px] ${themeSubtext} leading-normal mb-1`}>
                   {language === 'en'
                     ? 'Total vertical distance from probe JSN-SR04T to riverbed/drain bottom (cm). Used for water elevation (h = H_ref - d).'
-                    : 'Jarak total dari probe JSN-SR04T ke dasar drainase sungai (cm). Nilai ini digunakan untuk menghitung elevasi air ($h = H_ref - d$).'}
+                    : 'Jarak total dari probe JSN-SR04T ke dasar drainase sungai (cm). Nilai ini digunakan untuk menghitung elevasi air (h = H_ref - d).'}
                 </p>
                 <input 
                   type="range" 
@@ -772,7 +809,7 @@ export default function AdminPanel({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-8 pt-6 border-t border-slate-100 dark:border-white/5">
+          <div className={`grid grid-cols-1 sm:grid-cols-3 gap-3 mt-8 pt-6 border-t ${themeBorder}`}>
             <button 
               onClick={triggerManualCalibration}
               disabled={statusAlat === 'Calibrating'}
@@ -806,18 +843,18 @@ export default function AdminPanel({
         </div>
 
         {/* Card 2: Notification & Alarm Preferences */}
-        <div id="admin-notifications-card" className={`${themeCard} rounded-2xl p-6 border ${themeBorder}`}>
-          <div className={`flex items-center justify-between mb-6 pb-4 border-b ${themeBorder}`}>
-            <div className="flex items-center gap-3">
-              <div className={`p-2 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-150 border-slate-200'} rounded-lg text-amber-500`}>
+        <div id="admin-notifications-card" className={`${themeCard} rounded-2xl p-4 sm:p-6 border ${themeBorder}`}>
+          <div className={`flex flex-wrap items-center justify-between gap-2 mb-6 pb-4 border-b ${themeBorder}`}>
+            <div className="flex items-center gap-3 min-w-0">
+              <div className={`p-2 border shrink-0 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-100 border-slate-200'} rounded-lg text-amber-500`}>
                 <Bell className="w-4 h-4 text-amber-500 animate-pulse" />
               </div>
-              <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>
+              <h3 className={`font-bold text-lg sm:text-xl leading-snug ${isDark ? 'text-white' : 'text-slate-900'}`}>
                 {language === 'en' ? 'Notification & Alarm Preferences' : 'Preferensi Notifikasi & Alarm'}
               </h3>
             </div>
-            <div className={`flex items-center gap-1.5 ${isDark ? 'bg-white/5 border-white/10 text-white/60' : 'bg-slate-100 border-slate-200 text-slate-600'} px-2.5 py-1 rounded text-[9px] font-mono tracking-widest uppercase`}>
-              OPERATOR PREFS
+            <div className={`flex items-center gap-1.5 shrink-0 border ${isDark ? 'bg-white/5 border-white/10 text-white/60' : 'bg-slate-100 border-slate-200 text-slate-600'} px-2.5 py-1 rounded text-[9px] font-mono tracking-widest uppercase`}>
+              {language === 'en' ? 'OPERATOR PREFS' : 'PREFERENSI OPERATOR'}
             </div>
           </div>
 
@@ -844,7 +881,7 @@ export default function AdminPanel({
                 </p>
               </div>
               
-              <div className="flex items-center gap-4 shrink-0 font-mono text-[10px]">
+              <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 shrink-0 font-mono text-[10px]">
                 {/* Sound toggle */}
                 <button 
                   onClick={() => onUpdatePreferences?.({ soundSiaga: !prefSoundSiaga })}
@@ -855,7 +892,7 @@ export default function AdminPanel({
                   }`}
                 >
                   {prefSoundSiaga ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
-                  <span>ALARM: {prefSoundSiaga ? 'ON' : 'OFF'}</span>
+                  <span>ALARM: {prefSoundSiaga ? (language === 'en' ? 'ON' : 'AKTIF') : (language === 'en' ? 'OFF' : 'MATI')}</span>
                 </button>
 
                 {/* Push toggle */}
@@ -868,7 +905,7 @@ export default function AdminPanel({
                   }`}
                 >
                   <Bell className="w-3.5 h-3.5" />
-                  <span>PUSH: {prefPushSiaga ? 'ON' : 'OFF'}</span>
+                  <span>PUSH: {prefPushSiaga ? (language === 'en' ? 'ON' : 'AKTIF') : (language === 'en' ? 'OFF' : 'MATI')}</span>
                 </button>
               </div>
             </div>
@@ -889,7 +926,7 @@ export default function AdminPanel({
                 </p>
               </div>
               
-              <div className="flex items-center gap-4 shrink-0 font-mono text-[10px]">
+              <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 shrink-0 font-mono text-[10px]">
                 {/* Sound toggle */}
                 <button 
                   onClick={() => onUpdatePreferences?.({ soundBahaya: !prefSoundBahaya })}
@@ -900,7 +937,7 @@ export default function AdminPanel({
                   }`}
                 >
                   {prefSoundBahaya ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
-                  <span>ALARM: {prefSoundBahaya ? 'ON' : 'OFF'}</span>
+                  <span>ALARM: {prefSoundBahaya ? (language === 'en' ? 'ON' : 'AKTIF') : (language === 'en' ? 'OFF' : 'MATI')}</span>
                 </button>
 
                 {/* Push toggle */}
@@ -913,7 +950,7 @@ export default function AdminPanel({
                   }`}
                 >
                   <Bell className="w-3.5 h-3.5" />
-                  <span>PUSH: {prefPushBahaya ? 'ON' : 'OFF'}</span>
+                  <span>PUSH: {prefPushBahaya ? (language === 'en' ? 'ON' : 'AKTIF') : (language === 'en' ? 'OFF' : 'MATI')}</span>
                 </button>
               </div>
             </div>
@@ -921,25 +958,25 @@ export default function AdminPanel({
         </div>
 
         {/* Card 4: Hardware IoT Integration & Live Bridge */}
-        <div id="hardware-bridge-card" className={`${themeCard} rounded-2xl p-6 border ${themeBorder}`}>
-          <div className={`flex items-center justify-between mb-4 pb-4 border-b ${themeBorder}`}>
-            <div className="flex items-center gap-3">
-              <div className={`p-2 ${isDark ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-emerald-50 border-emerald-200'} rounded-lg text-emerald-500`}>
+        <div id="hardware-bridge-card" className={`${themeCard} rounded-2xl p-4 sm:p-6 border ${themeBorder}`}>
+          <div className={`flex flex-wrap items-center justify-between gap-2 mb-4 pb-4 border-b ${themeBorder}`}>
+            <div className="flex items-center gap-3 min-w-0">
+              <div className={`p-2 border shrink-0 ${isDark ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-emerald-50 border-emerald-200'} rounded-lg text-emerald-500`}>
                 <Radio className="w-4 h-4 text-emerald-500 animate-pulse" />
               </div>
-              <div>
-                <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>
+              <div className="min-w-0">
+                <h3 className={`font-bold text-lg sm:text-xl leading-snug ${isDark ? 'text-white' : 'text-slate-900'}`}>
                   {language === 'en' ? 'ESP32 Hardware Integration (RTU)' : 'Integrasi Hardware ESP32 (RTU)'}
                 </h3>
                 <p className={`text-[10px] ${themeSubtext} font-mono mt-0.5`}>
                   {language === 'en'
                     ? 'Stateless REST API Architecture — No Login / Token Expiry Free'
-                    : 'Arsitektur Statless REST API — Tanpa Login / Bebas Token Expired'}
+                    : 'Arsitektur Stateless REST API — Tanpa Login / Bebas Token Expired'}
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-1.5 bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1 rounded text-[9px] font-mono text-emerald-400 font-bold tracking-widest uppercase">
-              READY FOR ESP32
+            <div className="flex items-center gap-1.5 shrink-0 bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1 rounded text-[9px] font-mono text-emerald-500 font-bold tracking-widest uppercase">
+              {language === 'en' ? 'READY FOR ESP32' : 'SIAP UNTUK ESP32'}
             </div>
           </div>
 
@@ -952,34 +989,38 @@ export default function AdminPanel({
           {/* Pinout and Hardware Summary Grid */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4 text-xs font-mono">
             <div className={`p-3 rounded-xl border ${themeInnerCard} flex flex-col justify-between`}>
-              <div className="flex items-center justify-between text-[10px] mb-1">
-                <span className="text-emerald-400 font-bold">ESP32 WROOM 32D</span>
+              <div className="flex items-center justify-between gap-2 text-[10px] mb-1">
+                <span className="text-emerald-500 font-bold">ESP32 WROOM 32D</span>
                 <span className="text-[9px] text-slate-400">STANDALONE</span>
               </div>
-              <div className="space-y-1 text-[10px] text-slate-300">
-                <div>• <span className="text-amber-400">GPIO05</span>: TRIG JSN-SR04T</div>
-                <div>• <span className="text-amber-400">GPIO18</span>: ECHO JSN-SR04T</div>
-                <div>• <span className="text-purple-400">GPIO34</span>: SOIL AO (Hujan)</div>
+              <div className={`space-y-1 text-[10px] ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                <div>• <span className="text-amber-500 font-semibold">GPIO05</span>: TRIG JSN-SR04T</div>
+                <div>• <span className="text-amber-500 font-semibold">GPIO18</span>: ECHO JSN-SR04T</div>
+                <div>• <span className="text-purple-500 font-semibold">GPIO34</span>: SOIL AO ({language === 'en' ? 'Rain' : 'Hujan'})</div>
               </div>
             </div>
 
             <div className={`p-3 rounded-xl border ${themeInnerCard} flex flex-col justify-between`}>
-              <div className="flex items-center justify-between text-[10px] mb-1">
-                <span className="text-pink-400 font-bold">CAPACITIVE V2.0</span>
-                <span className="text-[9px] text-slate-400">DETEKTOR HUJAN</span>
+              <div className="flex items-center justify-between gap-2 text-[10px] mb-1">
+                <span className="text-pink-500 font-bold">CAPACITIVE V2.0</span>
+                <span className="text-[9px] text-slate-400">{language === 'en' ? 'RAIN DETECTOR' : 'DETEKTOR HUJAN'}</span>
               </div>
-              <div className="text-[10px] text-slate-300 leading-snug">
-                Ditempatkan di bagian luar wadah mendeteksi tetesan hujan. Bebas karat polimer (menggantikan FC-37 biasa).
+              <div className={`text-[10px] leading-snug ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                {language === 'en'
+                  ? 'Mounted externally on top of the enclosure to detect raindrops. Corrosion-free polymer probe (replaces standard FC-37).'
+                  : 'Ditempatkan di bagian luar wadah mendeteksi tetesan hujan. Bebas karat polimer (menggantikan FC-37 biasa).'}
               </div>
             </div>
 
             <div className={`p-3 rounded-xl border ${themeInnerCard} flex flex-col justify-between`}>
-              <div className="flex items-center justify-between text-[10px] mb-1">
-                <span className="text-cyan-400 font-bold">POWER SUPPLY 4S</span>
+              <div className="flex items-center justify-between gap-2 text-[10px] mb-1">
+                <span className="text-cyan-500 font-bold">POWER SUPPLY 4S</span>
                 <span className="text-[9px] text-slate-400">14.8V ➔ 5V</span>
               </div>
-              <div className="text-[10px] text-slate-300 leading-snug">
-                4x 18650 Li-ion seri (14.8V) di-step-down oleh Buck Converter menjadi 5.0V teregulasi untuk ESP32 & sensor.
+              <div className={`text-[10px] leading-snug ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                {language === 'en'
+                  ? '4x 18650 Li-ion cells in series (14.8V) stepped down via Buck Converter to regulated 5.0V for ESP32 & sensors.'
+                  : '4x 18650 Li-ion seri (14.8V) di-step-down oleh Buck Converter menjadi 5.0V teregulasi untuk ESP32 & sensor.'}
               </div>
             </div>
           </div>
@@ -1007,7 +1048,13 @@ export default function AdminPanel({
                 <span className="text-[9px] text-emerald-400 font-bold">HTTPClient.h (Wi-Fi Native)</span>
               </div>
               <pre className="text-emerald-400 bg-black/60 p-2.5 rounded-lg overflow-x-auto text-[10px] leading-relaxed">
-{`{
+{language === 'en'
+  ? `{
+  "node_id": "node-kukusan-01",
+  "distances": [180.5, 180.2, 179.9, ... 360 samples ...],
+  "local_rain": 0 // 0: Dry, 1: Raindrop, 2: Heavy Wet
+}`
+  : `{
   "node_id": "node-kukusan-01",
   "distances": [180.5, 180.2, 179.9, ... 360 sampel ...],
   "local_rain": 0 // 0: Kering, 1: Tetesan Hujan, 2: Basah Presipitasi
@@ -1018,14 +1065,14 @@ export default function AdminPanel({
         </div>
 
         {/* Card 2: Input Mandiri Petugas Lapangan (Manual Peil Schaal) */}
-        <div id="admin-peil-schaal-card" className={`${themeCard} rounded-2xl p-6 border ${themeBorder}`}>
-          <div className={`flex items-center justify-between mb-5 pb-4 border-b ${themeBorder}`}>
-            <div className="flex items-center gap-3">
-              <div className={`p-2.5 rounded-xl ${isDark ? 'bg-amber-500/10 border-amber-500/20 text-amber-400' : 'bg-amber-50 border-amber-200 text-amber-600'} border`}>
+        <div id="admin-peil-schaal-card" className={`${themeCard} rounded-2xl p-4 sm:p-6 border ${themeBorder}`}>
+          <div className={`flex flex-wrap items-center justify-between gap-2 mb-5 pb-4 border-b ${themeBorder}`}>
+            <div className="flex items-center gap-3 min-w-0">
+              <div className={`p-2.5 rounded-xl shrink-0 ${isDark ? 'bg-amber-500/10 border-amber-500/20 text-amber-400' : 'bg-amber-50 border-amber-200 text-amber-600'} border`}>
                 <ClipboardCheck className="w-5 h-5" />
               </div>
-              <div>
-                <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>
+              <div className="min-w-0">
+                <h3 className={`font-bold text-lg sm:text-xl leading-snug ${isDark ? 'text-white' : 'text-slate-900'}`}>
                   {language === 'en' ? 'Manual Staff Peil Schaal Entry (Staff Gauge)' : 'Input Mandiri Peil Schaal (Mistar Lapangan)'}
                 </h3>
                 <span className={`text-[10px] ${themeSubtext} block font-mono mt-0.5`}>
@@ -1033,7 +1080,7 @@ export default function AdminPanel({
                 </span>
               </div>
             </div>
-            <span className="px-2.5 py-1 rounded-lg text-[9px] font-mono font-bold bg-amber-500/15 border border-amber-500/30 text-amber-400 uppercase tracking-wider">
+            <span className="px-2.5 py-1 rounded-lg text-[9px] font-mono font-bold bg-amber-500/15 border border-amber-500/30 text-amber-500 uppercase tracking-wider shrink-0">
               {language === 'en' ? 'EMERGENCY SOP' : 'SOP DARURAT'}
             </span>
           </div>
@@ -1047,7 +1094,7 @@ export default function AdminPanel({
           <form onSubmit={handleSubmitManualPeil} className="space-y-4">
             {/* Water Level (TMA) */}
             <div className={`p-4 rounded-xl border ${themeInnerCard}`}>
-              <div className="flex items-center justify-between mb-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                 <label className={`text-[10px] font-mono font-bold uppercase tracking-wider ${themeLabel} flex items-center gap-1.5`}>
                   <Ruler className="w-3.5 h-3.5 text-amber-400" />
                   {language === 'en' ? 'Peil Schaal Water Level (TMA)' : 'Ketinggian Air Peil Schaal (TMA)'}
@@ -1083,8 +1130,8 @@ export default function AdminPanel({
                 className="w-full accent-amber-400 cursor-pointer h-1.5 bg-black/40 rounded-lg mb-3"
               />
 
-              <div className="flex items-center justify-between gap-1.5 flex-wrap">
-                <div className="flex items-center gap-1.5">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex flex-wrap items-center gap-1.5">
                   <span className={`text-[9px] font-mono ${themeLabel}`}>{language === 'en' ? 'Quick Preset:' : 'Preset Cepat:'}</span>
                   {[
                     { label: language === 'en' ? 'Normal (35cm)' : 'Normal (35cm)', val: 35 },
@@ -1172,19 +1219,19 @@ export default function AdminPanel({
                 {language === 'en' ? 'Field Weather Condition at Observation' : 'Kondisi Cuaca Lapangan Saat Pengamatan'}
               </label>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                {[
-                  { label: language === 'en' ? 'Sunny / Clear' : 'Cerah Terik', icon: Sun },
-                  { label: language === 'en' ? 'Cloudy / Overcast' : 'Berawan / Teduh', icon: CloudRain },
-                  { label: language === 'en' ? 'Moderate Rain' : 'Hujan Sedang', icon: CloudRain },
-                  { label: language === 'en' ? 'Heavy Rain / Storm' : 'Hujan Deras / Badai', icon: AlertTriangle }
-                ].map((item) => {
+                {([
+                  { key: 'sunny' as const, label: language === 'en' ? 'Sunny / Clear' : 'Cerah Terik', icon: Sun },
+                  { key: 'cloudy' as const, label: language === 'en' ? 'Cloudy / Overcast' : 'Berawan / Teduh', icon: CloudRain },
+                  { key: 'moderate_rain' as const, label: language === 'en' ? 'Moderate Rain' : 'Hujan Sedang', icon: CloudRain },
+                  { key: 'heavy_rain' as const, label: language === 'en' ? 'Heavy Rain / Storm' : 'Hujan Deras / Badai', icon: AlertTriangle }
+                ]).map((item) => {
                   const Icon = item.icon;
-                  const isSelected = manualWeather === item.label;
+                  const isSelected = manualWeather === item.key;
                   return (
                     <button
-                      key={item.label}
+                      key={item.key}
                       type="button"
-                      onClick={() => setManualWeather(item.label)}
+                      onClick={() => setManualWeather(item.key)}
                       className={`px-2.5 py-2 rounded-xl text-xs font-mono flex items-center justify-center gap-1.5 border transition-all cursor-pointer ${
                         isSelected
                           ? 'bg-amber-400 text-black border-amber-300 font-bold shadow-sm'
@@ -1297,18 +1344,18 @@ export default function AdminPanel({
         </div>
 
         {/* Card 3: Admin Credentials Modification */}
-        <div id="admin-credentials-card" className={`${themeCard} rounded-2xl p-6 border ${themeBorder}`}>
-          <div className={`flex items-center justify-between mb-6 pb-4 border-b ${themeBorder}`}>
-            <div className="flex items-center gap-3">
-              <div className={`p-2 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-150 border-slate-200'} rounded-lg text-indigo-500`}>
+        <div id="admin-credentials-card" className={`${themeCard} rounded-2xl p-4 sm:p-6 border ${themeBorder}`}>
+          <div className={`flex flex-wrap items-center justify-between gap-2 mb-6 pb-4 border-b ${themeBorder}`}>
+            <div className="flex items-center gap-3 min-w-0">
+              <div className={`p-2 border shrink-0 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-100 border-slate-200'} rounded-lg text-indigo-500`}>
                 <Key className="w-4 h-4 text-indigo-500" />
               </div>
-              <h3 className={`font-bold text-xl ${isDark ? 'text-white' : 'text-slate-900'}`}>
+              <h3 className={`font-bold text-lg sm:text-xl leading-snug ${isDark ? 'text-white' : 'text-slate-900'}`}>
                 {language === 'en' ? 'Change PLC Administrator Credentials' : 'Ubah Kredensial Administrator PLC'}
               </h3>
             </div>
-            <div className={`flex items-center gap-1.5 ${isDark ? 'bg-white/5 border-white/10 text-white/60' : 'bg-slate-100 border-slate-200 text-slate-600'} px-2.5 py-1 rounded text-[9px] font-mono tracking-widest uppercase`}>
-              SECURITY KEY
+            <div className={`flex items-center gap-1.5 shrink-0 border ${isDark ? 'bg-white/5 border-white/10 text-white/60' : 'bg-slate-100 border-slate-200 text-slate-600'} px-2.5 py-1 rounded text-[9px] font-mono tracking-widest uppercase`}>
+              {language === 'en' ? 'SECURITY KEY' : 'KUNCI KEAMANAN'}
             </div>
           </div>
 
@@ -1420,7 +1467,7 @@ export default function AdminPanel({
       <div id="admin-simulation-card" className="col-span-12 lg:col-span-5 flex flex-col gap-6">
         
         {/* Simulation Mode Engine */}
-        <div id="sim-engine" className={`${themeCard} rounded-2xl p-6 relative flex flex-col justify-between`}>
+        <div id="sim-engine" className={`${themeCard} rounded-2xl p-4 sm:p-6 border ${themeBorder} relative flex flex-col justify-between`}>
           <div>
             <div className="flex justify-between items-center mb-4">
               <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeLabel} font-mono`}>
@@ -1638,17 +1685,17 @@ export default function AdminPanel({
 
           </div>
 
-          <div className="mt-5 pt-4 border-t border-white/5 flex items-center justify-between text-[10px] font-mono text-slate-500">
+          <div className={`mt-5 pt-4 border-t ${themeBorder} flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono text-slate-500`}>
             <span className="flex items-center gap-1.5">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
               {language === 'en' ? 'Database Quota Protection Active' : 'Proteksi Kuota Database Aktif'}
             </span>
-            <span>Auto-Terminasi: &gt;90 cm</span>
+            <span>{language === 'en' ? 'Auto-Stop: >90 cm' : 'Auto-Terminasi: >90 cm'}</span>
           </div>
         </div>
 
         {/* RTU Log console panel */}
-        <div id="scada-rtu-log" className={`${themeCard} rounded-2xl p-6 flex flex-col`}>
+        <div id="scada-rtu-log" className={`${themeCard} rounded-2xl p-4 sm:p-6 border ${themeBorder} flex flex-col`}>
           <div>
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
@@ -1687,15 +1734,15 @@ export default function AdminPanel({
         </div>
 
         {/* BATCH TELEMETRY DATA INSPECTOR - 360 ARRAY VIEWER */}
-        <div id="batch-telemetry-container" className={`${themeCard} rounded-2xl p-6 flex flex-col justify-between`}>
+        <div id="batch-telemetry-container" className={`${themeCard} rounded-2xl p-4 sm:p-6 border ${themeBorder} flex flex-col justify-between`}>
           <div>
-            <div className="flex justify-between items-start mb-4">
-              <div className="flex items-center gap-3">
-                <div className={`p-2.5 ${isDark ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-emerald-50 border-emerald-200'} rounded-xl text-emerald-500`}>
+            <div className="flex flex-wrap justify-between items-start gap-2 mb-4">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className={`p-2.5 border shrink-0 ${isDark ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-emerald-50 border-emerald-200'} rounded-xl text-emerald-500`}>
                   <Radio className="w-5 h-5 animate-pulse" />
                 </div>
-                <div>
-                  <h3 className={`font-bold text-lg ${isDark ? 'text-white' : 'text-slate-800'} leading-tight`}>
+                <div className="min-w-0">
+                  <h3 className={`font-bold text-base sm:text-lg ${isDark ? 'text-white' : 'text-slate-800'} leading-tight`}>
                     {language === 'en' ? 'ESP32 Batch Telemetry Inspector' : 'Inspektor Batch Telemetri ESP32'}
                   </h3>
                   <p className={`font-mono text-[9px] uppercase tracking-wider ${themeLabel} mt-0.5`}>
@@ -1710,7 +1757,7 @@ export default function AdminPanel({
                 const rawBatch: any[] = (latestReading as any)?.readings || (latestReading as any)?.batch_data || [];
                 const batchCount = rawBatch.length || (latestReading as any)?.samples_count || 0;
                 return (
-                  <span className="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/25 rounded-lg text-[10px] font-mono text-emerald-400 font-bold shrink-0">
+                  <span className="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/25 rounded-lg text-[10px] font-mono text-emerald-500 font-bold shrink-0">
                     {batchCount > 0 
                       ? `${batchCount} ${language === 'en' ? 'POINTS' : 'TITIK'}` 
                       : (language === 'en' ? '360 SAMPLES/BATCH' : '360 SAMPEL/BATCH')}
@@ -1720,35 +1767,37 @@ export default function AdminPanel({
             </div>
 
             {/* Status & Quota Efficiency Specs */}
-            <div className={`${isDark ? 'bg-black/60 border border-white/5' : 'bg-slate-50 border-slate-200'} rounded-xl p-4 font-mono text-xs space-y-2.5`}>
-              <div className="flex items-center justify-between border-b border-white/5 pb-2">
+            <div className={`${isDark ? 'bg-black/60 border border-white/5' : 'bg-slate-50 border border-slate-200'} rounded-xl p-4 font-mono text-xs space-y-2.5`}>
+              <div className={`flex flex-wrap items-center justify-between gap-1 border-b ${themeBorder} pb-2`}>
                 <span className={`${themeLabel} text-[10px] uppercase`}>
                   {language === 'en' ? 'Data Status:' : 'Status Data:'}
                 </span>
-                <span className="text-emerald-400 font-bold text-right">{timeAgoText} (STANDBY PAUSED)</span>
+                <span className="text-emerald-500 font-bold text-right">
+                  {timeAgoText} {language === 'en' ? '(STANDBY PAUSED)' : '(STANDBY DIJEDA)'}
+                </span>
               </div>
 
-              <div className="flex items-center justify-between border-b border-white/5 pb-2">
+              <div className={`flex flex-wrap items-center justify-between gap-1 border-b ${themeBorder} pb-2`}>
                 <span className={`${themeLabel} text-[10px] uppercase`}>
                   {language === 'en' ? 'Active Source:' : 'Sumber Terkini:'}
                 </span>
                 <span className="text-[#3B82F6] font-bold">{latestReading?.source || 'Hardware-ESP32-Batch'}</span>
               </div>
 
-              <div className="flex items-center justify-between border-b border-white/5 pb-2">
+              <div className={`flex flex-wrap items-center justify-between gap-1 border-b ${themeBorder} pb-2`}>
                 <span className={`${themeLabel} text-[10px] uppercase`}>
                   {language === 'en' ? 'Payload Structure:' : 'Struktur Payload:'}
                 </span>
-                <span className="text-[#3B82F6] font-bold">
+                <span className="text-[#3B82F6] font-bold text-right">
                   {language === 'en' ? 'Single Array [ [Time, TMA] / Distance ]' : 'Array tunggal [ [Waktu, TMA] / Jarak ]'}
                 </span>
               </div>
 
-              <div className="flex items-center justify-between border-b border-white/5 pb-2">
+              <div className={`flex flex-wrap items-center justify-between gap-1 border-b ${themeBorder} pb-2`}>
                 <span className={`${themeLabel} text-[10px] uppercase`}>
                   {language === 'en' ? 'DB Write Efficiency:' : 'Efisiensi Write DB:'}
                 </span>
-                <span className="text-emerald-400 font-bold">
+                <span className="text-emerald-500 font-bold text-right">
                   {language === 'en' ? '1 Write / 6 Minutes (99.7% Quota Saved)' : '1 Write / 6 Menit (Hemat 99.7%)'}
                 </span>
               </div>
@@ -1787,12 +1836,12 @@ export default function AdminPanel({
             </div>
           </div>
 
-          <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between text-[10px] font-mono text-slate-400">
+          <div className={`mt-4 pt-3 border-t ${themeBorder} flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono text-slate-400`}>
             <span className="flex items-center gap-1.5">
               <Database className="w-3.5 h-3.5 text-[#3B82F6]" />
               <span>POST /api/telemetry/batch</span>
             </span>
-            <span className="text-emerald-400 font-semibold">{language === 'en' ? 'Connected' : 'Terkoneksi'}</span>
+            <span className="text-emerald-500 font-semibold">{language === 'en' ? 'Connected' : 'Terkoneksi'}</span>
           </div>
         </div>
 

@@ -1,0 +1,6 @@
+{
+  "name": "SIMBA - Monitoring Tinggi Air Sungai",
+  "description": "Sistem monitoring tinggi air drainase sungai Depok-Jakarta menggunakan sensor ultrasonik terkalibrasi suhu JSN-SR04T, data cuaca BMKG, dan prediksi prognostik deep learning didukung asisten kecerdasan ahli Gemini 3.1 Pro.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

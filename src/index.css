@@ -54,3 +54,38 @@
   animation: screen-pulse-bahaya 0.75s infinite ease-in-out;
 }
 
+.hardware-graph-control {
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, transform 120ms ease;
+}
+
+.hardware-graph-control:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.hardware-node-card {
+  transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
+}
+
+.hardware-history-graph {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.hardware-graph-panel-enter {
+  animation: hardware-panel-fade 280ms ease-out;
+}
+
+@keyframes hardware-panel-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hardware-graph-control,
+  .hardware-node-card,
+  .hardware-graph-panel-enter {
+    transition: none;
+    animation: none;
+  }
+}
+

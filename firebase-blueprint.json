@@ -1,0 +1,97 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "entities": {
+    "SensorReading": {
+      "title": "Sensor Reading",
+      "description": "Telemetry reading captured from water level sensors",
+      "type": "object",
+      "properties": {
+        "timestamp": { "type": "number", "description": "Timestamp in milliseconds" },
+        "water_level": { "type": "number", "description": "Water elevation in cm" },
+        "distance": { "type": "number", "description": "Raw ultrasonic distance in cm" },
+        "temperature": { "type": "number", "description": "Ambient temperature in Celsius" },
+        "humidity": { "type": "number", "description": "Relative humidity in percentage" },
+        "local_rain": { "type": "number", "description": "Rain detection status (0-3)" },
+        "node_id": { "type": "string", "description": "RTU Node identifier" },
+        "source": { "type": "string", "description": "Data source origin" }
+      },
+      "required": ["timestamp", "node_id"]
+    },
+    "SystemConfig": {
+      "title": "System Config",
+      "description": "RTU Node and SCADA system configuration",
+      "type": "object",
+      "properties": {
+        "node_id": { "type": "string" },
+        "threshold_siaga": { "type": "number" },
+        "threshold_bahaya": { "type": "number" },
+        "status_alat": { "type": "string" },
+        "auto_simulation": { "type": "boolean" },
+        "simulation_mode": { "type": "string" },
+        "sampling_rate_seconds": { "type": "number" },
+        "reference_height": { "type": "number" }
+      },
+      "required": ["node_id"]
+    },
+    "SystemLog": {
+      "title": "System Log",
+      "description": "System event and status log entries",
+      "type": "object",
+      "properties": {
+        "timestamp": { "type": "number" },
+        "source": { "type": "string" },
+        "level": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "required": ["timestamp", "source", "level", "message"]
+    },
+    "BmkgForecast": {
+      "title": "BMKG Forecast",
+      "description": "Cached BMKG weather forecast snapshot",
+      "type": "object",
+      "properties": {
+        "timestamp": { "type": "number" },
+        "node_id": { "type": "string" },
+        "cuaca": { "type": "string" },
+        "curah_hujan": { "type": "number" },
+        "kelembapan": { "type": "number" },
+        "suhu": { "type": "number" }
+      },
+      "required": ["timestamp", "node_id"]
+    },
+    "Prediction": {
+      "title": "Water Level Prediction",
+      "description": "Forecast output from AI/hydrological prediction",
+      "type": "object",
+      "properties": {
+        "timestamp": { "type": "number" },
+        "node_id": { "type": "string" },
+        "predicted_level": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["timestamp", "node_id"]
+    }
+  },
+  "firestore": {
+    "/sensor_readings/{readingId}": {
+      "schema": "SensorReading",
+      "description": "Water level sensor readings time-series"
+    },
+    "/system_config/{configId}": {
+      "schema": "SystemConfig",
+      "description": "Node configuration settings"
+    },
+    "/system_logs/{logId}": {
+      "schema": "SystemLog",
+      "description": "Historical audit and event logs"
+    },
+    "/bmkg_forecast/{forecastId}": {
+      "schema": "BmkgForecast",
+      "description": "BMKG weather forecast snapshots"
+    },
+    "/predictions/{predictionId}": {
+      "schema": "Prediction",
+      "description": "Predicted water level records"
+    }
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "coordinate_order": "longitude,latitude",
+  "nodes": [
+    {
+      "id": "UP1",
+      "name": "Puncak",
+      "longitude": "106.9635388000",
+      "latitude": "-6.6917680000",
+      "terrainElevationSampleM": 983,
+      "elevationSource": "nearest pixel from local SRTM GeoTIFF; not surveyed bed/stage",
+      "coordinateSource": "CupVisual/config/nodes/iot_1"
+    },
+    {
+      "id": "UP2",
+      "name": "Katulampa",
+      "longitude": "106.8346880000",
+      "latitude": "-6.6336889000",
+      "terrainElevationSampleM": 339,
+      "elevationSource": "nearest pixel from local SRTM GeoTIFF; not surveyed bed/stage",
+      "coordinateSource": "CupVisual/config/nodes/iot_2"
+    },
+    {
+      "id": "UP3",
+      "name": "Sukaraja",
+      "longitude": "106.8098130000",
+      "latitude": "-6.5601124000",
+      "terrainElevationSampleM": 178,
+      "elevationSource": "nearest pixel from local SRTM GeoTIFF; not surveyed bed/stage",
+      "coordinateSource": "CupVisual/config/nodes/iot_3"
+    },
+    {
+      "id": "UP4",
+      "name": "Cibinong",
+      "longitude": "106.8180795000",
+      "latitude": "-6.4650414000",
+      "terrainElevationSampleM": 109,
+      "elevationSource": "nearest pixel from local SRTM GeoTIFF; not surveyed bed/stage",
+      "coordinateSource": "CupVisual/config/nodes/iot_4"
+    },
+    {
+      "id": "N1",
+      "name": "Pos Depok",
+      "longitude": "106.8316850",
+      "latitude": "-6.4005985",
+      "terrainElevationSampleM": 70,
+      "elevationSource": "nearest pixel from local SRTM GeoTIFF; not surveyed bed/stage"
+    },
+    {
+      "id": "N2",
+      "name": "Ciliwung Stage 1",
+      "longitude": "106.8385996",
+      "latitude": "-6.3499224",
+      "terrainElevationSampleM": 53,
+      "elevationSource": "nearest pixel from local SRTM GeoTIFF; not surveyed bed/stage"
+    },
+    {
+      "id": "N3",
+      "name": "Ciliwung Stage 2",
+      "longitude": "106.8524555",
+      "latitude": "-6.3000107",
+      "terrainElevationSampleM": 25,
+      "elevationSource": "nearest pixel from local SRTM GeoTIFF; not surveyed bed/stage"
+    },
+    {
+      "id": "N4",
+      "name": "Ciliwung Stage 3",
+      "longitude": "106.8631031",
+      "latitude": "-6.2500000",
+      "terrainElevationSampleM": 17,
+      "elevationSource": "nearest pixel from local SRTM GeoTIFF; not surveyed bed/stage"
+    },
+    {
+      "id": "N5",
+      "name": "Pintu Air Manggarai",
+      "longitude": "106.8483991",
+      "latitude": "-6.2078464",
+      "terrainElevationSampleM": 11,
+      "elevationSource": "nearest pixel from local SRTM GeoTIFF; not surveyed bed/stage"
+    }
+  ]
+}

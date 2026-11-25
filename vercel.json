@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    {
+      "source": "/((?!api/|3d/|assets/|alarm_.*\\.mp3).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

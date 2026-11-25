@@ -3,8 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { db, handleFirestoreError, OperationType } from '../firebaseConfig';
+import { playAlertPreviewChime } from '../utils/alarmAudio';
+import { apiUrl } from '../utils/apiBase';
+import { runLstmForecast } from '../ml/lstmEngine';
 import { collection, query, orderBy, limit, onSnapshot, doc, getDocs, where } from 'firebase/firestore';
 import { 
   SensorReading, 
@@ -19,8 +22,6 @@ import {
   CloudRain, 
   Thermometer, 
   Percent, 
-  Battery, 
-  Cpu, 
   Rss, 
   RefreshCw, 
   Compass, 
@@ -38,13 +39,14 @@ import {
   Eye,
   Info,
   ClipboardCheck,
-  Sliders,
   Radio,
   CheckCircle2,
   RotateCcw,
   ShieldCheck,
   Zap,
-  X
+  Map as MapIcon,
+  LineChart as LineChartIcon,
+  CloudSun
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -59,6 +61,8 @@ import {
 } from 'recharts';
 
 import { extractReadingTimestamp, normalizeSensorReading } from '../utils/readingUtils';
+import CiliwungHardwareLiveView from './CiliwungHardwareLiveView';
+import { loadHardwareHistory24h } from '../hardware-history';
 export { extractReadingTimestamp, normalizeSensorReading };
 
 export function translateConditionToEn(c: string): string {
@@ -128,7 +132,9 @@ export default function SCADADashboard({
   language = 'id',
   soundEnabled: propSoundEnabled,
   onToggleSound,
-  onResetSimulation
+  onResetSimulation,
+  sharedReadings,
+  hasSharedReadings,
 }: {
   config: SystemConfig | null;
   theme?: 'light' | 'dark';
@@ -136,12 +142,14 @@ export default function SCADADashboard({
   prefSoundBahaya?: boolean;
   prefPushSiaga?: boolean;
   prefPushBahaya?: boolean;
-  onNavigateTab?: (tab: 'dashboard' | 'admin') => void;
+  onNavigateTab?: (tab: 'dashboard' | 'simulation' | 'admin') => void;
   onLatestReadingChange?: (reading: SensorReading | null) => void;
   language?: 'id' | 'en';
   soundEnabled?: boolean;
   onToggleSound?: () => void;
   onResetSimulation?: () => Promise<void>;
+  sharedReadings?: SensorReading[];
+  hasSharedReadings?: boolean;
 }) {
   const [readingsList, setReadingsList] = useState<SensorReading[]>([]);
   const [latestReading, setLatestReading] = useState<SensorReading | null>(null);
@@ -156,7 +164,7 @@ export default function SCADADashboard({
   const handleInjectQuickTest = async () => {
     setIsInjectingTestTelemetry(true);
     try {
-      await fetch('/api/sim-data', {
+      await fetch(apiUrl('/api/sim-data'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: 'dry', water_level: 35 })
@@ -168,22 +176,40 @@ export default function SCADADashboard({
     }
   };
 
-  // Live Grounded Weather & Sound Warning systems
+  // Official BMKG Public API weather state (100% real data, zero fabricated defaults)
   const [liveWeather, setLiveWeather] = useState<{
-    precipitation_mm: string | number;
+    source: 'BMKG' | 'Open-Meteo';
+    adm4: string | null;
+    location_name: string;
     temperature_c: number;
-    humidity_percent: number;
+    humidity_percent: number | null;
+    precipitation_mm: string | number;
     condition: string;
-    alerts: string[];
+    wind_speed_kph: number | null;
+    wind_direction: string;
+    visibility_km: string;
+    cloud_cover_percent: number | null;
+    weather_icon: string;
+    valid_at: string;
+    valid_hour_wib: string;
+    analysis_date: string | null;
     last_updated: string;
-    summary: string;
-    wind_speed_kph?: number;
-    wind_direction?: string;
-    visibility_km?: string | number;
-    weather_icon?: string;
-    location_name?: string;
+    forecast_slots: Array<{
+      time_wib: string;
+      date_label: string;
+      temperature_c: number;
+      humidity_percent: number | null;
+      precipitation_mm: number;
+      condition: string;
+      wind_speed_kph: number | null;
+      wind_direction: string;
+      weather_icon: string;
+    }>;
   } | null>(null);
+  const [weatherError, setWeatherError] = useState<string | null>(null);
   const [loadingWeather, setLoadingWeather] = useState(false);
+  const [weatherMode, setWeatherMode] = useState<'live' | 'sensor_sim'>('live');
+  const [dashboardSubTab, setDashboardSubTab] = useState<'map' | 'chart' | 'weather'>('map');
   const [internalSoundEnabled, setInternalSoundEnabled] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('scada_sound_enabled') !== 'false';
@@ -201,7 +227,7 @@ export default function SCADADashboard({
       setInternalSoundEnabled(next);
       localStorage.setItem('scada_sound_enabled', String(next));
       if (next) {
-        playAlertSound('Siaga');
+        playAlertPreviewChime();
       }
     }
   };
@@ -209,7 +235,6 @@ export default function SCADADashboard({
   const [chartRange, setChartRange] = useState<'realtime' | '24h'>('realtime');
   const [chartViewMode, setChartViewMode] = useState<'elevation' | 'raw_ultrasonic'>('elevation');
   const [useBatch360Mode, setUseBatch360Mode] = useState<boolean>(false);
-  const [showWiringModal, setShowWiringModal] = useState<boolean>(false);
   const [timeAgoText, setTimeAgoText] = useState<string>(language === 'en' ? 'Waiting for readings...' : 'Menunggu pembacaan data...');
 
   // Hardware status timeout detection: 15 minutes tolerance (900,000 ms)
@@ -279,112 +304,8 @@ export default function SCADADashboard({
     return () => clearInterval(timer);
   }, [latestReading, language]);
 
-  // Keep track of the active custom Audio object and synthesizer loops to prevent overlap
-  const activeAudioRef = React.useRef<HTMLAudioElement | null>(null);
-  const synthIntervalRef = React.useRef<NodeJS.Timeout | null>(null);
-
-  const stopCurrentAudio = () => {
-    if (synthIntervalRef.current) {
-      clearInterval(synthIntervalRef.current);
-      synthIntervalRef.current = null;
-    }
-    if (activeAudioRef.current) {
-      try {
-        if ((activeAudioRef.current as any)._loopInterval) {
-          clearInterval((activeAudioRef.current as any)._loopInterval);
-          (activeAudioRef.current as any)._loopInterval = null;
-        }
-        activeAudioRef.current.pause();
-        activeAudioRef.current.currentTime = 0;
-      } catch (err) {
-        console.warn('Failed to stop current audio:', err);
-      }
-      activeAudioRef.current = null;
-    }
-  };
-
-  const setupAudioAnalyser = (audio: HTMLAudioElement) => {
-    try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioContextClass) return;
-
-      if (!(window as any).__visualizerContext) {
-        (window as any).__visualizerContext = new AudioContextClass();
-      }
-      const ctx = (window as any).__visualizerContext;
-      
-      if (ctx.state === 'suspended') {
-        ctx.resume();
-      }
-
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 32;
-      const bufferLength = analyser.frequencyBinCount;
-      const dataArray = new Uint8Array(bufferLength);
-
-      audio.crossOrigin = "anonymous";
-      const source = ctx.createMediaElementSource(audio);
-      source.connect(analyser);
-      analyser.connect(ctx.destination);
-
-      let animId: number;
-      const readData = () => {
-        if (!activeAudioRef.current || activeAudioRef.current !== audio) {
-          cancelAnimationFrame(animId);
-          return;
-        }
-
-        analyser.getByteFrequencyData(dataArray);
-        
-        let sum = 0;
-        for (let i = 0; i < bufferLength; i++) {
-          sum += dataArray[i];
-        }
-        const avg = sum / bufferLength;
-        const norm = Math.min(avg / 130, 1.0); 
-        
-        (window as any).__audioAmplitude = norm;
-
-        animId = requestAnimationFrame(readData);
-      };
-
-      animId = requestAnimationFrame(readData);
-
-      audio.addEventListener('pause', () => {
-        cancelAnimationFrame(animId);
-        (window as any).__audioAmplitude = 0;
-      });
-      audio.addEventListener('ended', () => {
-        cancelAnimationFrame(animId);
-        (window as any).__audioAmplitude = 0;
-      });
-    } catch (err) {
-      console.warn('[Audio Analyser] Fallback active:', err);
-      
-      let start = Date.now();
-      let animIdFallback: number;
-      const runFallback = () => {
-        if (!activeAudioRef.current || activeAudioRef.current !== audio) {
-          cancelAnimationFrame(animIdFallback);
-          return;
-        }
-        
-        const t = (Date.now() - start) / 1000;
-        const isBahaya = (audio as any)._alertType === 'Bahaya';
-        const speed = isBahaya ? 6 : 2;
-        const norm = 0.5 + 0.5 * Math.sin(t * speed);
-        
-        (window as any).__audioAmplitude = norm;
-        animIdFallback = requestAnimationFrame(runFallback);
-      };
-      
-      animIdFallback = requestAnimationFrame(runFallback);
-    }
-  };
-
   const isDark = theme === 'dark';
   const themeCard = isDark ? 'bg-[#0D0D0F] border-white/5 shadow-xl text-slate-300' : 'bg-white border-slate-200 shadow-md text-slate-700';
-  const themeBgInner = isDark ? 'bg-black/40 border-white/5' : 'bg-slate-50 border-slate-150';
   const themeTextHeader = isDark ? 'text-white' : 'text-slate-800';
   const themeTextMuted = isDark ? 'text-white/40' : 'text-slate-400';
   const themeTextSub = isDark ? 'text-white/50' : 'text-slate-500';
@@ -401,45 +322,80 @@ export default function SCADADashboard({
     );
   }
 
-  // Bind real-time Firestore listeners for readings, predictions, BMKG data and config
+  // Sync shared sensor_readings from App.tsx when available so tab switching never drops or duplicates listeners
   useEffect(() => {
-    // 1. Listen for recent sensor readings (last 20 documents for ultra-low quota footprint)
-    const unsubscribeReadings = onSnapshot(
-      getFirestoreQuery('sensor_readings', 20),
-      (snapshot) => {
-        setHasReceivedReadingsSnapshot(true);
-        const data: SensorReading[] = [];
-        const refH = config?.reference_height || 300;
-        snapshot.forEach((doc) => {
-          const normalized = normalizeSensorReading(doc.id, doc.data(), refH);
-          data.push(normalized);
-        });
-        // Sort ascending for chart
-        const sorted = data.sort((a, b) => a.timestamp - b.timestamp);
-        setReadingsList(sorted);
-        if (sorted.length > 0) {
-          let chosen = sorted[sorted.length - 1];
-          // If simulation is not active (normal mode / after reset), pick the latest real ESP hardware reading
-          if (!config?.auto_simulation) {
-            const espReading = sorted.slice().reverse().find(r => 
-              r.source?.includes('Hardware') || r.source?.includes('ESP') || !r.source?.toLowerCase().includes('simulat')
-            );
-            if (espReading) {
-              chosen = espReading;
-            }
-          }
-          setLatestReading(chosen);
-          onLatestReadingChange?.(chosen);
-        } else {
-          setLatestReading(null);
-          onLatestReadingChange?.(null);
+    if (!sharedReadings) return;
+    if (hasSharedReadings) setHasReceivedReadingsSnapshot(true);
+    setReadingsList(sharedReadings);
+    if (sharedReadings.length > 0) {
+      let chosen = sharedReadings[sharedReadings.length - 1];
+      if (!config?.auto_simulation) {
+        const espReading = sharedReadings
+          .slice()
+          .reverse()
+          .find(
+            (r) =>
+              r.source?.includes('Hardware') ||
+              r.source?.includes('ESP') ||
+              !r.source?.toLowerCase().includes('simulat')
+          );
+        if (espReading) {
+          chosen = espReading;
         }
-      },
-      (error) => {
-        setHasReceivedReadingsSnapshot(true);
-        handleFirestoreError(error, OperationType.GET, 'sensor_readings');
       }
-    );
+      setLatestReading(chosen);
+      onLatestReadingChange?.(chosen);
+    } else {
+      setLatestReading(null);
+      onLatestReadingChange?.(null);
+    }
+  }, [sharedReadings, hasSharedReadings, config?.auto_simulation, onLatestReadingChange]);
+
+  // Bind real-time Firestore listeners for predictions, BMKG data (and readings fallback if sharedReadings absent)
+  useEffect(() => {
+    let unsubscribeReadings: (() => void) | null = null;
+    if (sharedReadings === undefined) {
+      unsubscribeReadings = onSnapshot(
+        getFirestoreQuery('sensor_readings', 48),
+        (snapshot) => {
+          setHasReceivedReadingsSnapshot(true);
+          const data: SensorReading[] = [];
+          const refH = config?.reference_height || 300;
+          snapshot.forEach((doc) => {
+            const normalized = normalizeSensorReading(doc.id, doc.data(), refH);
+            data.push(normalized);
+          });
+          const sorted = data.sort((a, b) => a.timestamp - b.timestamp);
+          setReadingsList(sorted);
+          if (sorted.length > 0) {
+            let chosen = sorted[sorted.length - 1];
+            if (!config?.auto_simulation) {
+              const espReading = sorted
+                .slice()
+                .reverse()
+                .find(
+                  (r) =>
+                    r.source?.includes('Hardware') ||
+                    r.source?.includes('ESP') ||
+                    !r.source?.toLowerCase().includes('simulat')
+                );
+              if (espReading) {
+                chosen = espReading;
+              }
+            }
+            setLatestReading(chosen);
+            onLatestReadingChange?.(chosen);
+          } else {
+            setLatestReading(null);
+            onLatestReadingChange?.(null);
+          }
+        },
+        (error) => {
+          setHasReceivedReadingsSnapshot(true);
+          handleFirestoreError(error, OperationType.GET, 'sensor_readings');
+        }
+      );
+    }
 
     // 2. Listen to the latest prediction
     const unsubscribePrediction = onSnapshot(
@@ -475,7 +431,7 @@ export default function SCADADashboard({
     setIsLoading(false);
 
     return () => {
-      unsubscribeReadings();
+      unsubscribeReadings?.();
       unsubscribePrediction();
       unsubscribeBMKG();
     };
@@ -507,7 +463,7 @@ export default function SCADADashboard({
         }
       };
 
-      const res = await fetch('/api/predict', {
+      const res = await fetch(apiUrl('/api/predict'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -552,257 +508,99 @@ export default function SCADADashboard({
     }
   };
 
-  // Fetch live weather data with Google Search Grounding and language support
-  const fetchLiveWeather = async (targetLang: string = language) => {
-    setLoadingWeather(true);
+  const weatherAbortRef = useRef<AbortController | null>(null);
+
+  // Fetch genuine live weather directly from official BMKG public API via backend proxy
+  const fetchLiveWeather = async (
+    targetLang: string = language,
+    silent: boolean = false,
+    forceRefresh: boolean = false
+  ) => {
+    weatherAbortRef.current?.abort();
+    const controller = new AbortController();
+    weatherAbortRef.current = controller;
+
+    if (!silent) {
+      setLoadingWeather(true);
+    }
+    setWeatherError(null);
+
+    const query = forceRefresh
+      ? `/api/live-weather?lang=${targetLang}&force=1`
+      : `/api/live-weather?lang=${targetLang}`;
+    const maxAttempts = silent ? 2 : 3;
+    let lastError: any = null;
+
     try {
-      const res = await fetch(`/api/live-weather?lang=${targetLang}`);
-      if (!res.ok) throw new Error('Live weather fetch failed');
-      const data = await res.json();
-      setLiveWeather(data);
-    } catch (err) {
-      console.error(err);
-      if (targetLang === 'en') {
-        setLiveWeather({
-          precipitation_mm: "12.5 mm",
-          temperature_c: 26,
-          humidity_percent: 88,
-          condition: "Moderate Rain / Overcast",
-          wind_speed_kph: 6.7,
-          wind_direction: "South ↑",
-          visibility_km: "< 9 km",
-          alerts: [
-            "BMKG Early Warning: Be aware of potential moderate to heavy rain accompanied by lightning and gusty winds in South Jakarta and Depok.",
-            "Alert for rising water elevation (TMA) of upstream Ciliwung River due to heavy rainfall."
-          ],
-          last_updated: "July 8, 2026, 06:00 WIB",
-          summary: "Upstream weather across Depok-Bogor is wet with accumulated moderate rainfall reaching 12.5 mm. High humidity induces convective cloud formation along the river basin."
-        });
-      } else {
-        setLiveWeather({
-          precipitation_mm: "12.5 mm",
-          temperature_c: 26,
-          humidity_percent: 88,
-          condition: "Hujan Sedang / Berawan Tebal",
-          wind_speed_kph: 6.7,
-          wind_direction: "Selatan ↑",
-          visibility_km: "< 9 km",
-          alerts: [
-            "Peringatan Dini BMKG: Waspada potensi hujan sedang hingga lebat disertai kilat/petir dan angin kencang di wilayah Jakarta Selatan dan Depok pada sore hingga malam hari.",
-            "Waspada kenaikan Tinggi Muka Air (TMA) Sungai Ciliwung hulu Bogor-Depok akibat curah hujan tinggi."
-          ],
-          last_updated: "8 Juli 2026, 06:00 WIB",
-          summary: "Kondisi cuaca hulu Depok-Bogor dilaporkan basah dengan curah hujan sedang akumulatif mencapai 12.5 mm dalam 1 jam terakhir. Kelembaban udara tinggi memicu potensi pembentukan awan konvektif tebal sepanjang aliran sungai Ciliwung."
-        });
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (controller.signal.aborted) return;
+        try {
+          const res = await fetch(apiUrl(query), {
+            cache: 'no-store',
+            signal: controller.signal,
+          });
+          const contentType = res.headers.get('content-type') || '';
+          if (!contentType.includes('application/json')) {
+            throw new Error(
+              targetLang === 'en'
+                ? 'Backend API unreachable (check VITE_API_BASE_URL on Vercel → Railway).'
+                : 'Backend API tidak terjangkau (pastikan VITE_API_BASE_URL di Vercel diarahkan ke domain Railway).'
+            );
+          }
+          const data = await res.json();
+          if (!res.ok) {
+            if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt < maxAttempts) {
+              lastError = new Error(data?.error || `HTTP ${res.status}`);
+              await new Promise((r) => window.setTimeout(r, attempt * 1200));
+              continue;
+            }
+            throw new Error(
+              data?.error ||
+                (targetLang === 'en'
+                  ? 'Official BMKG weather API is currently unreachable.'
+                  : 'API prakiraan cuaca resmi BMKG sedang tidak dapat dijangkau.')
+            );
+          }
+          if (!controller.signal.aborted) {
+            setLiveWeather(data);
+            setWeatherError(null);
+          }
+          return;
+        } catch (err: any) {
+          if (controller.signal.aborted || err?.name === 'AbortError') return;
+          lastError = err;
+          if (attempt < maxAttempts) {
+            await new Promise((r) => window.setTimeout(r, attempt * 1200));
+            continue;
+          }
+        }
+      }
+
+      if (controller.signal.aborted) return;
+      console.warn('[BMKG] Live weather fetch unavailable after retries:', lastError?.message || lastError);
+      if (!silent) {
+        setWeatherError(
+          targetLang === 'en'
+            ? 'Official BMKG weather API is temporarily unreachable. Tap Retry to sync again.'
+            : 'API prakiraan cuaca resmi BMKG sedang tidak dapat dijangkau sementara. Klik Muat Ulang untuk mencoba lagi.'
+        );
       }
     } finally {
-      setLoadingWeather(false);
-    }
-  };
-
-  // Simulate synthesized audio amplitude
-  const simulateSynthPulse = (durationMs: number, maxAmp: number) => {
-    const start = Date.now();
-    const interval = setInterval(() => {
-      const elapsed = Date.now() - start;
-      if (elapsed >= durationMs) {
-        clearInterval(interval);
-        (window as any).__audioAmplitude = 0;
-      } else {
-        const progress = elapsed / durationMs;
-        const amp = Math.sin(progress * Math.PI) * maxAmp;
-        (window as any).__audioAmplitude = Math.max((window as any).__audioAmplitude || 0, amp);
+      if (!controller.signal.aborted && !silent) {
+        setLoadingWeather(false);
       }
-    }, 16);
-  };
-
-  // Synthesize warning tones using Web Audio API as fallback
-  const playSynthesizedSound = (type: 'Siaga' | 'Bahaya') => {
-    try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioContextClass) return;
-      const ctx = new AudioContextClass();
-      
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      
-      if (type === 'Bahaya') {
-        // Waspada/Bahaya -> Urgent dual-tone siren
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(950, ctx.currentTime);
-        
-        gain.gain.setValueAtTime(0.12, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.18);
-        
-        osc.start();
-        osc.stop(ctx.currentTime + 0.2);
-
-        simulateSynthPulse(200, 0.95);
-
-        // Play second tone shortly after
-        setTimeout(() => {
-          simulateSynthPulse(200, 1.0);
-          try {
-            const ctx2 = new AudioContextClass();
-            const osc2 = ctx2.createOscillator();
-            const gain2 = ctx2.createGain();
-            osc2.connect(gain2);
-            gain2.connect(ctx2.destination);
-            osc2.type = 'triangle';
-            osc2.frequency.setValueAtTime(1050, ctx2.currentTime);
-            gain2.gain.setValueAtTime(0.12, ctx2.currentTime);
-            gain2.gain.exponentialRampToValueAtTime(0.001, ctx2.currentTime + 0.18);
-            osc2.start();
-            osc2.stop(ctx2.currentTime + 0.2);
-          } catch (e) {}
-        }, 180);
-      } else {
-        // Siaga -> Elegant distinct dual-tone chime (High to Low)
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(620, ctx.currentTime);
-        
-        gain.gain.setValueAtTime(0.08, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.22);
-        
-        osc.start();
-        osc.stop(ctx.currentTime + 0.25);
-
-        simulateSynthPulse(250, 0.7);
-
-        // Play second chime note shortly after
-        setTimeout(() => {
-          simulateSynthPulse(250, 0.75);
-          try {
-            const ctx2 = new AudioContextClass();
-            const osc2 = ctx2.createOscillator();
-            const gain2 = ctx2.createGain();
-            osc2.connect(gain2);
-            gain2.connect(ctx2.destination);
-            osc2.type = 'sine';
-            osc2.frequency.setValueAtTime(490, ctx2.currentTime);
-            gain2.gain.setValueAtTime(0.08, ctx2.currentTime);
-            gain2.gain.exponentialRampToValueAtTime(0.001, ctx2.currentTime + 0.22);
-            osc2.start();
-            osc2.stop(ctx2.currentTime + 0.25);
-          } catch (e) {}
-        }, 160);
-      }
-    } catch (e) {
-      console.warn('Synthesized audio failed:', e);
     }
   };
 
-  const triggerSynthesizedLoop = (type: 'Siaga' | 'Bahaya') => {
-    if (synthIntervalRef.current) {
-      clearInterval(synthIntervalRef.current);
-    }
-    const intervalTime = type === 'Bahaya' ? 1500 : 4500;
-    synthIntervalRef.current = setInterval(() => {
-      playSynthesizedSound(type);
-    }, intervalTime);
-  };
-
-  // Play warning tones or custom mp3 cleanly (no overlapping, seamless native looping)
-  const playAlertSound = (type: 'Siaga' | 'Bahaya') => {
-    // If already playing custom audio for this alert type, do not interrupt it (keeps loop perfectly smooth)
-    if (activeAudioRef.current && (activeAudioRef.current as any)._alertType === type) {
-      console.log(`[Audio] Already looping custom alarm for: ${type}`);
-      return;
-    }
-
-    // Always stop any playing audio first to prevent overlap (ketiban)
-    stopCurrentAudio();
-
-    try {
-      const audioPaths = type === 'Siaga' 
-        ? [
-            '/alarm_siaga.mp3',
-            '/alarm_siaga.wav',
-            '/siaga.mp3',
-            '/siaga.wav',
-            '/assets/alarm_siaga.mp3',
-            '/assets/siaga.mp3'
-          ]
-        : [
-            '/alarm_bahaya.mp3',
-            '/alarm_bahaya.wav',
-            '/bahaya.mp3',
-            '/bahaya.wav',
-            '/assets/alarm_bahaya.mp3',
-            '/assets/bahaya.mp3'
-          ];
-        
-      const tryPlayAudio = (index: number) => {
-        if (index >= audioPaths.length) {
-          // All MP3 files failed, fall back to synthesized sound
-          playSynthesizedSound(type);
-          triggerSynthesizedLoop(type);
-          return;
-        }
-        
-        const audio = new Audio(audioPaths[index]);
-        audio.volume = type === 'Siaga' ? 0.45 : 0.55;
-        audio.loop = true; // Keep native loop as secondary fallback
-        (audio as any)._alertType = type;
-        
-        // High-precision pre-emptive gapless loop to eliminate the trailing decoder/padding silence gap in MP3/WAV files.
-        const gaplessTimer = setInterval(() => {
-          if (audio.paused || audio.ended || activeAudioRef.current !== audio) {
-            clearInterval(gaplessTimer);
-            return;
-          }
-          // If we reach 120ms before the absolute duration, trigger seamless restart
-          if (audio.duration && audio.currentTime >= audio.duration - 0.12) {
-            audio.currentTime = 0.01; // Jump past any starting silence frame
-          }
-        }, 20);
-        (audio as any)._loopInterval = gaplessTimer;
-
-        // Save reference so we can stop it later
-        activeAudioRef.current = audio;
-
-        audio.play()
-          .then(() => {
-            console.log(`[Audio] Played custom alarm audio with gapless loop: ${audioPaths[index]}`);
-            
-            // Wire up real-time audio-reactivity!
-            setupAudioAnalyser(audio);
-
-            // Cancel any fallback synthesized interval since custom audio is looping flawlessly
-            if (synthIntervalRef.current) {
-              clearInterval(synthIntervalRef.current);
-              synthIntervalRef.current = null;
-            }
-          })
-          .catch((err) => {
-            console.warn(`[Audio] Failed to play: ${audioPaths[index]}`, err);
-            if ((audio as any)._loopInterval) {
-              clearInterval((audio as any)._loopInterval);
-            }
-            if (activeAudioRef.current === audio) {
-              activeAudioRef.current = null;
-              tryPlayAudio(index + 1);
-            }
-          });
-      };
-      
-      tryPlayAudio(0);
-    } catch (e) {
-      console.warn('Audio play block failed, falling back:', e);
-      playSynthesizedSound(type);
-      triggerSynthesizedLoop(type);
-    }
-  };
-
-  // Run initial weather fetch on dashboard open and refetch when language changes
+  // Run initial weather fetch on dashboard open, refetch when language changes, and auto-sync every 5 minutes
   useEffect(() => {
-    fetchLiveWeather(language);
-    (window as any).__playAlertSound = playAlertSound;
+    fetchLiveWeather(language, false, false);
+    const interval = window.setInterval(() => {
+      fetchLiveWeather(language, true, false);
+    }, 5 * 60 * 1000);
     return () => {
-      delete (window as any).__playAlertSound;
+      window.clearInterval(interval);
+      weatherAbortRef.current?.abort();
     };
   }, [language]);
 
@@ -815,7 +613,7 @@ export default function SCADADashboard({
   let alertStatus: 'Normal' | 'Siaga' | 'Bahaya' | 'Offline' = 'Normal';
   let alertBg = 'bg-[#3B82F6]/10 border border-[#3B82F6]/25 text-[#3B82F6]';
   let alertLed = 'bg-[#3B82F6]';
-  let alertLabel = language === 'en' ? 'SYSTEM OPTIMAL / NORMAL' : 'SYSTEM OPTIMAL / AMAN';
+  let alertLabel = language === 'en' ? 'SYSTEM OPTIMAL / NORMAL' : 'SISTEM OPTIMAL / AMAN';
 
   if (isDeviceOffline) {
     alertStatus = 'Offline';
@@ -836,28 +634,168 @@ export default function SCADADashboard({
     alertLabel = language === 'en' ? 'WARNING / ALERT' : 'SIAGA / WASPADA';
   }
 
-  // Audio Warning Loop Effect (respects soundEnabled and operator preferences)
-  useEffect(() => {
-    if (!soundEnabled || alertStatus === 'Normal' || alertStatus === 'Offline') {
-      stopCurrentAudio();
-      return;
-    }
-    if (alertStatus === 'Siaga' && !prefSoundSiaga) {
-      stopCurrentAudio();
-      return;
-    }
-    if (alertStatus === 'Bahaya' && !prefSoundBahaya) {
-      stopCurrentAudio();
-      return;
-    }
+  const localizedAlertStatus =
+    alertStatus === 'Bahaya'
+      ? (language === 'en' ? 'DANGER' : 'BAHAYA')
+      : alertStatus === 'Siaga'
+        ? (language === 'en' ? 'ALERT' : 'SIAGA')
+        : alertStatus === 'Offline'
+          ? 'OFFLINE'
+          : (language === 'en' ? 'SAFE' : 'AMAN');
 
-    // Play once immediately (loops natively if custom file works, or triggers synth interval if fallback is active)
-    playAlertSound(alertStatus);
+  // Sensor-linked weather simulation profile (for indoor hardware demos synced to live ESP32 elevation)
+  const sensorLinkedWeather = useMemo(() => {
+    const en = language === 'en';
+    const now = new Date();
+    const wibMs = now.getTime() + 7 * 60 * 60 * 1000;
+    const wibDate = new Date(wibMs);
+    const wibHour = wibDate.getUTCHours();
+    const wibMin = wibDate.getUTCMinutes();
+    const pad2 = (n: number) => String(n).padStart(2, '0');
+    const isNight = wibHour < 6 || wibHour >= 18;
+    const period = isNight ? 'pm' : 'am';
+    const timeLabel = `${pad2(wibHour)}.${pad2(wibMin)} WIB`;
+    const slotHour = `${pad2(wibHour)}.00 WIB`;
+    const monthsId = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+    const monthsEn = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const formatDateShort = (d: Date) =>
+      `${pad2(d.getUTCDate())} ${(en ? monthsEn : monthsId)[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+    const validAt = `${formatDateShort(wibDate)}, ${slotHour}`;
 
-    return () => {
-      stopCurrentAudio();
+    const level = Math.max(0, Number(currentLevel) || 0);
+    const siaga = Math.max(10, thresholdSiaga);
+    const bahaya = Math.max(siaga + 10, thresholdBahaya);
+
+    const iconBase = 'https://api-apps.bmkg.go.id/storage/icon/cuaca';
+    const iconUrl = (file: string) => `${iconBase}/${encodeURIComponent(file)}`;
+
+    let temperature_c = isNight ? 26 : 29;
+    let humidity_percent = 76;
+    let precipNum = 0.2;
+    let condition = en ? 'Mostly Cloudy' : 'Berawan';
+    let wind_speed_kph = 4.2;
+    let wind_direction = en ? 'East ←' : 'Timur ←';
+    let visibility_km = '> 10 km';
+    let cloud_cover_percent = 72;
+    let weather_icon = iconUrl(`berawan-${period}.svg`);
+
+    type SlotSpec = {
+      tempDelta: number;
+      hu: number;
+      tp: number;
+      condId: string;
+      condEn: string;
+      ws: number;
+      wdId: string;
+      wdEn: string;
+      iconFile: (p: 'am' | 'pm') => string;
     };
-  }, [soundEnabled, alertStatus, prefSoundSiaga, prefSoundBahaya]);
+
+    let slotSpecs: SlotSpec[] = [
+      { tempDelta: 0, hu: 78, tp: 0, condId: 'Berawan', condEn: 'Mostly Cloudy', ws: 4.5, wdId: 'Timur ←', wdEn: 'East ←', iconFile: (p) => `berawan-${p}.svg` },
+      { tempDelta: -1, hu: 80, tp: 0, condId: 'Cerah Berawan', condEn: 'Partly Cloudy', ws: 3.8, wdId: 'Tenggara ↖', wdEn: 'Southeast ↖', iconFile: (p) => `cerah berawan-${p}.svg` },
+      { tempDelta: -1, hu: 82, tp: 0, condId: 'Cerah Berawan', condEn: 'Partly Cloudy', ws: 3.2, wdId: 'Selatan ↑', wdEn: 'South ↑', iconFile: (p) => `cerah berawan-${p}.svg` },
+      { tempDelta: 1, hu: 75, tp: 0, condId: 'Berawan', condEn: 'Mostly Cloudy', ws: 4.8, wdId: 'Timur ←', wdEn: 'East ←', iconFile: (p) => `berawan-${p}.svg` },
+    ];
+
+    if (level >= bahaya) {
+      const excess = Math.min(1, (level - bahaya) / 80);
+      const isStorm = level >= bahaya + 35;
+      temperature_c = isStorm ? 23 : 24;
+      humidity_percent = Math.round(95 + excess * 4);
+      precipNum = Math.round((24 + excess * 24) * 10) / 10;
+      condition = isStorm
+        ? (en ? 'Thunderstorm' : 'Hujan Petir')
+        : (en ? 'Heavy Rain' : 'Hujan Lebat');
+      wind_speed_kph = Math.round((16.5 + excess * 8.5) * 10) / 10;
+      wind_direction = en ? 'Southwest ↗' : 'Barat Daya ↗';
+      visibility_km = isStorm ? '1.5 km' : '2.5 km';
+      cloud_cover_percent = 100;
+      weather_icon = iconUrl(isStorm ? 'hujan petir.svg' : 'hujan lebat.svg');
+      slotSpecs = [
+        { tempDelta: 0, hu: 96, tp: Math.round(precipNum * 0.75 * 10) / 10, condId: 'Hujan Lebat', condEn: 'Heavy Rain', ws: 15.8, wdId: 'Barat Daya ↗', wdEn: 'Southwest ↗', iconFile: () => 'hujan lebat.svg' },
+        { tempDelta: 1, hu: 93, tp: 11.4, condId: 'Hujan Sedang', condEn: 'Moderate Rain', ws: 11.2, wdId: 'Barat →', wdEn: 'West →', iconFile: () => 'hujan sedang.svg' },
+        { tempDelta: 1, hu: 89, tp: 3.6, condId: 'Hujan Ringan', condEn: 'Light Rain', ws: 7.4, wdId: 'Barat →', wdEn: 'West →', iconFile: () => 'hujan ringan.svg' },
+        { tempDelta: 2, hu: 85, tp: 0.4, condId: 'Berawan', condEn: 'Mostly Cloudy', ws: 5.1, wdId: 'Selatan ↑', wdEn: 'South ↑', iconFile: (p) => `berawan-${p}.svg` },
+      ];
+    } else if (level >= siaga) {
+      const ratio = Math.min(1, (level - siaga) / Math.max(1, bahaya - siaga));
+      temperature_c = 25;
+      humidity_percent = Math.round(89 + ratio * 5);
+      precipNum = Math.round((8.5 + ratio * 10.5) * 10) / 10;
+      condition = en ? 'Moderate Rain' : 'Hujan Sedang';
+      wind_speed_kph = Math.round((10.2 + ratio * 4.8) * 10) / 10;
+      wind_direction = en ? 'West →' : 'Barat →';
+      visibility_km = '4.5 km';
+      cloud_cover_percent = 95;
+      weather_icon = iconUrl('hujan sedang.svg');
+      slotSpecs = [
+        { tempDelta: 0, hu: 92, tp: Math.round(precipNum * 0.8 * 10) / 10, condId: 'Hujan Sedang', condEn: 'Moderate Rain', ws: 10.4, wdId: 'Barat →', wdEn: 'West →', iconFile: () => 'hujan sedang.svg' },
+        { tempDelta: 0, hu: 88, tp: 3.8, condId: 'Hujan Ringan', condEn: 'Light Rain', ws: 7.2, wdId: 'Barat Daya ↗', wdEn: 'Southwest ↗', iconFile: () => 'hujan ringan.svg' },
+        { tempDelta: 1, hu: 84, tp: 0.5, condId: 'Berawan', condEn: 'Mostly Cloudy', ws: 5.4, wdId: 'Selatan ↑', wdEn: 'South ↑', iconFile: (p) => `berawan-${p}.svg` },
+        { tempDelta: 2, hu: 80, tp: 0, condId: 'Cerah Berawan', condEn: 'Partly Cloudy', ws: 4.1, wdId: 'Tenggara ↖', wdEn: 'Southeast ↖', iconFile: (p) => `cerah berawan-${p}.svg` },
+      ];
+    } else if (level >= siaga * 0.65) {
+      const ratio = Math.min(1, (level - siaga * 0.65) / Math.max(1, siaga * 0.35));
+      temperature_c = isNight ? 25 : 27;
+      humidity_percent = Math.round(82 + ratio * 6);
+      precipNum = Math.round((1.8 + ratio * 3.4) * 10) / 10;
+      condition = en ? 'Light Rain' : 'Hujan Ringan';
+      wind_speed_kph = Math.round((6.5 + ratio * 2.5) * 10) / 10;
+      wind_direction = en ? 'South ↑' : 'Selatan ↑';
+      visibility_km = '7.5 km';
+      cloud_cover_percent = 86;
+      weather_icon = iconUrl('hujan ringan.svg');
+      slotSpecs = [
+        { tempDelta: 0, hu: 86, tp: 2.1, condId: 'Hujan Ringan', condEn: 'Light Rain', ws: 6.8, wdId: 'Selatan ↑', wdEn: 'South ↑', iconFile: () => 'hujan ringan.svg' },
+        { tempDelta: -1, hu: 84, tp: 0.6, condId: 'Berawan', condEn: 'Mostly Cloudy', ws: 5.2, wdId: 'Tenggara ↖', wdEn: 'Southeast ↖', iconFile: (p) => `berawan-${p}.svg` },
+        { tempDelta: 0, hu: 81, tp: 0, condId: 'Berawan', condEn: 'Mostly Cloudy', ws: 4.5, wdId: 'Timur ←', wdEn: 'East ←', iconFile: (p) => `berawan-${p}.svg` },
+        { tempDelta: 1, hu: 78, tp: 0, condId: 'Cerah Berawan', condEn: 'Partly Cloudy', ws: 4.0, wdId: 'Timur ←', wdEn: 'East ←', iconFile: (p) => `cerah berawan-${p}.svg` },
+      ];
+    }
+
+    const forecast_slots = slotSpecs.map((spec, idx) => {
+      const slotDate = new Date(wibMs + (idx + 1) * 3 * 60 * 60 * 1000);
+      const hr = slotDate.getUTCHours();
+      const slotPeriod: 'am' | 'pm' = hr < 6 || hr >= 18 ? 'pm' : 'am';
+      return {
+        time_wib: `${pad2(hr)}.00`,
+        date_label: formatDateShort(slotDate),
+        temperature_c: temperature_c + spec.tempDelta,
+        humidity_percent: spec.hu,
+        precipitation_mm: spec.tp,
+        condition: en ? spec.condEn : spec.condId,
+        wind_speed_kph: spec.ws,
+        wind_direction: en ? spec.wdEn : spec.wdId,
+        weather_icon: iconUrl(spec.iconFile(slotPeriod)),
+      };
+    });
+
+    return {
+      source: 'BMKG' as const,
+      adm4: '32.76.06.1002',
+      location_name: 'Kukusan, Beji, Kota Depok',
+      temperature_c,
+      humidity_percent,
+      precipitation_mm: `${precipNum.toLocaleString(en ? 'en-US' : 'id-ID')} mm`,
+      condition,
+      wind_speed_kph,
+      wind_direction,
+      visibility_km,
+      cloud_cover_percent,
+      weather_icon,
+      valid_at: validAt,
+      valid_hour_wib: slotHour,
+      analysis_date: null,
+      last_updated: timeLabel,
+      forecast_slots,
+    };
+  }, [currentLevel, thresholdSiaga, thresholdBahaya, language]);
+
+  const isSensorSimWeather = weatherMode === 'sensor_sim';
+  const activeWeather = isSensorSimWeather ? sensorLinkedWeather : liveWeather;
+
+  // Audio warning playback is managed globally by App.tsx across Dashboard, Simulasi 3D, and Kontrol PLC.
 
   // Request Browser Notification Permission on mount
   useEffect(() => {
@@ -881,20 +819,30 @@ export default function SCADADashboard({
 
     if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
       if (alertStatus === 'Bahaya' && prefPushBahaya) {
-        new Notification("⚠️ BAHAYA: ELEVASI AIR KRITIS!", {
-          body: `Tinggi air mencapai ${currentLevel} cm (melebihi ambang bahaya ${thresholdBahaya} cm). Segera lakukan evakuasi!`,
-          icon: "/favicon.ico",
-          tag: "scada-alert-bahaya"
-        });
+        new Notification(
+          language === 'en' ? '⚠️ DANGER: CRITICAL WATER ELEVATION!' : '⚠️ BAHAYA: ELEVASI AIR KRITIS!',
+          {
+            body: language === 'en'
+              ? `Water level reached ${currentLevel} cm (exceeding danger threshold ${thresholdBahaya} cm). Evacuate immediately!`
+              : `Tinggi air mencapai ${currentLevel} cm (melebihi ambang bahaya ${thresholdBahaya} cm). Segera lakukan evakuasi!`,
+            icon: '/favicon.ico',
+            tag: 'scada-alert-bahaya',
+          }
+        );
       } else if (alertStatus === 'Siaga' && prefPushSiaga && prevStatus === 'Normal') {
-        new Notification("⚠️ WASPADA: STATUS SIAGA!", {
-          body: `Tinggi air mencapai ${currentLevel} cm (melebihi ambang siaga ${thresholdSiaga} cm). Pantau secara berkala.`,
-          icon: "/favicon.ico",
-          tag: "scada-alert-siaga"
-        });
+        new Notification(
+          language === 'en' ? '⚠️ WARNING: ALERT STATUS!' : '⚠️ WASPADA: STATUS SIAGA!',
+          {
+            body: language === 'en'
+              ? `Water level reached ${currentLevel} cm (exceeding alert threshold ${thresholdSiaga} cm). Monitor continuously.`
+              : `Tinggi air mencapai ${currentLevel} cm (melebihi ambang siaga ${thresholdSiaga} cm). Pantau secara berkala.`,
+            icon: '/favicon.ico',
+            tag: 'scada-alert-siaga',
+          }
+        );
       }
     }
-  }, [alertStatus, prefPushSiaga, prefPushBahaya, currentLevel, thresholdSiaga, thresholdBahaya]);
+  }, [alertStatus, prefPushSiaga, prefPushBahaya, currentLevel, thresholdSiaga, thresholdBahaya, language]);
 
   const [isExportingCSV, setIsExportingCSV] = useState(false);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
@@ -945,11 +893,15 @@ export default function SCADADashboard({
         return;
       }
 
-      const headers = ['Timestamp', 'Waktu Lokal', 'Elevasi Air (cm)', 'Jarak Sensor JSN-SR04T (cm)', 'Deteksi Tetesan Hujan (Capacitive V2.0)', 'Sumber Data', 'Suhu BMKG (C)', 'Kelembapan BMKG (%)'];
+      const headers = language === 'en'
+        ? ['Timestamp', 'Local Time', 'Water Elevation (cm)', 'JSN-SR04T Sensor Distance (cm)', 'Raindrop Detection (Capacitive V2.0)', 'Data Source', 'BMKG Temp (C)', 'BMKG Humidity (%)']
+        : ['Timestamp', 'Waktu Lokal', 'Elevasi Air (cm)', 'Jarak Sensor JSN-SR04T (cm)', 'Deteksi Tetesan Hujan (Capacitive V2.0)', 'Sumber Data', 'Suhu BMKG (C)', 'Kelembapan BMKG (%)'];
       const rows = exportList.map(r => {
         const dateStr = new Date(r.timestamp).toISOString();
-        const localTimeStr = new Date(r.timestamp).toLocaleString('id-ID');
-        const rainLabel = r.local_rain === 0 ? 'Kering / Cerah' : r.local_rain === 1 ? 'Tetesan Hujan' : r.local_rain === 2 ? 'Basah Presipitasi' : 'Hujan Lebat';
+        const localTimeStr = new Date(r.timestamp).toLocaleString(language === 'en' ? 'en-US' : 'id-ID');
+        const rainLabel = language === 'en'
+          ? (r.local_rain === 0 ? 'Dry / Clear' : r.local_rain === 1 ? 'Raindrop Detected' : r.local_rain === 2 ? 'Wet Precipitation' : 'Heavy Rain')
+          : (r.local_rain === 0 ? 'Kering / Cerah' : r.local_rain === 1 ? 'Tetesan Hujan' : r.local_rain === 2 ? 'Basah Presipitasi' : 'Hujan Lebat');
         return [
           dateStr,
           `"${localTimeStr}"`,
@@ -1069,112 +1021,371 @@ export default function SCADADashboard({
       })
     : cleanReadings;
 
-  // Future Prediction Points
-  const predictionCurves = latestPrediction ? [
-    { name: 'T+30m', prediksi: latestPrediction.prediction_30m },
-    { name: 'T+1h', prediksi: latestPrediction.prediction_1h },
-    { name: 'T+3h', prediksi: latestPrediction.prediction_3h },
-    { name: 'T+6h', prediksi: latestPrediction.prediction_6h }
-  ] : [];
+  // Live 6-hour autoregressive LSTM inference using trained weights from model_lstm_banjir.h5
+  const lstmForecast = useMemo(() => {
+    const sourceFiltered = !config?.auto_simulation
+      ? readingsList.filter(
+          (r) =>
+            r.source?.includes('Hardware') ||
+            r.source?.includes('ESP') ||
+            !r.source?.toLowerCase().includes('simulat')
+        )
+      : readingsList;
+
+    const baseList = sourceFiltered.length > 0 ? sourceFiltered : readingsList;
+    let series: number[] = baseList
+      .map((r) => r.water_level)
+      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+
+    // If fewer than 24 Firestore records exist but ESP32 sent a 360-sample batch, downsample evenly to 24 steps
+    if (series.length < 24 && hasBatchData) {
+      const batchLevels: number[] = rawBatch
+        .map((item: any) => {
+          if (Array.isArray(item)) return Number(item[1]);
+          if (item && typeof item === 'object') {
+            if (typeof item.distance === 'number') return Math.max(0, refHeight - item.distance);
+            if (typeof item.water_level === 'number') return item.water_level;
+          }
+          return NaN;
+        })
+        .filter((v: number) => Number.isFinite(v));
+
+      if (batchLevels.length >= 2) {
+        const targetCount = Math.min(24, batchLevels.length);
+        const sampled: number[] = [];
+        for (let i = 0; i < targetCount; i++) {
+          const idx = Math.round((i * (batchLevels.length - 1)) / Math.max(1, targetCount - 1));
+          sampled.push(batchLevels[idx]);
+        }
+        series = sampled;
+      }
+    }
+
+    if (series.length === 0 && latestReading && typeof latestReading.water_level === 'number') {
+      series = [latestReading.water_level];
+    }
+
+    if (series.length === 0) return null;
+
+    return runLstmForecast(series, {
+      thresholdSiaga,
+      thresholdBahaya,
+      maxReferenceHeight: refHeight,
+    });
+  }, [readingsList, rawBatch, hasBatchData, latestReading, config?.auto_simulation, thresholdSiaga, thresholdBahaya, refHeight]);
+
+  const localizedLstmStatus = lstmForecast
+    ? lstmForecast.status === 'Bahaya'
+      ? (language === 'en' ? 'DANGER' : 'BAHAYA')
+      : lstmForecast.status === 'Siaga'
+        ? (language === 'en' ? 'ALERT' : 'SIAGA')
+        : (language === 'en' ? 'SAFE' : 'AMAN')
+    : 'STANDBY';
+
+  // Unified Historical + Trained LSTM Forecast Series (Single Source of Truth in Elevation Mode)
+  const activeForecast = lstmForecast
+    ? {
+        p30m: lstmForecast.prediction_30m,
+        p1h: lstmForecast.prediction_1h,
+        p3h: lstmForecast.prediction_3h,
+        p6h: lstmForecast.prediction_6h,
+      }
+    : latestPrediction
+      ? {
+          p30m: latestPrediction.prediction_30m,
+          p1h: latestPrediction.prediction_1h,
+          p3h: latestPrediction.prediction_3h,
+          p6h: latestPrediction.prediction_6h,
+        }
+      : null;
+
+  const lastHistoricalTimeLabel =
+    chartData.length > 0 ? chartData[chartData.length - 1].time : undefined;
+
+  const unifiedChartData = useMemo(() => {
+    if (chartViewMode !== 'elevation' || !activeForecast || chartData.length === 0) {
+      return chartData.map((pt) => ({ ...pt, prediksi: null as number | null }));
+    }
+    const base = chartData.map((pt, idx) => ({
+      ...pt,
+      prediksi: idx === chartData.length - 1 ? pt.elevasi : (null as number | null),
+    }));
+    return [
+      ...base,
+      {
+        time: 'T+30m',
+        elevasi: null as number | null,
+        raw_distance: null as number | null,
+        prediksi: activeForecast.p30m,
+        local_rain: 0,
+        suhu: latestReading?.temperature || 28,
+        source: 'LSTM Forecast',
+      },
+      {
+        time: language === 'en' ? 'T+1h' : 'T+1j',
+        elevasi: null as number | null,
+        raw_distance: null as number | null,
+        prediksi: activeForecast.p1h,
+        local_rain: 0,
+        suhu: latestReading?.temperature || 28,
+        source: 'LSTM Forecast',
+      },
+      {
+        time: language === 'en' ? 'T+3h' : 'T+3j',
+        elevasi: null as number | null,
+        raw_distance: null as number | null,
+        prediksi: activeForecast.p3h,
+        local_rain: 0,
+        suhu: latestReading?.temperature || 28,
+        source: 'LSTM Forecast',
+      },
+      {
+        time: language === 'en' ? 'T+6h' : 'T+6j',
+        elevasi: null as number | null,
+        raw_distance: null as number | null,
+        prediksi: activeForecast.p6h,
+        local_rain: 0,
+        suhu: latestReading?.temperature || 28,
+        source: 'LSTM Forecast',
+      },
+    ];
+  }, [chartData, chartViewMode, activeForecast, language, latestReading?.temperature]);
+
+  const elevationAxisMax = useMemo(() => {
+    const values = unifiedChartData.flatMap((d) => [
+      typeof d.elevasi === 'number' ? d.elevasi : 0,
+      typeof d.prediksi === 'number' ? d.prediksi : 0,
+    ]);
+    const peak = Math.max(160, thresholdBahaya + 30, ...values.map((v) => v + 20));
+    return Math.ceil(peak / 10) * 10;
+  }, [unifiedChartData, thresholdBahaya]);
+
+  const isHardwareLive = Boolean(latestReading?.source?.includes('Hardware') && !isDeviceOffline);
 
   return (
-    <div id="scada-dashboard-root" className="grid grid-cols-1 lg:grid-cols-12 gap-6 pb-12">
-      
-      {/* HARDWARE DATA PAUSE & REAL-TIME QUOTA SAVER BANNER */}
-      <div id="scada-hardware-pause-banner" className={`col-span-12 p-4 rounded-2xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${
-        latestReading?.source?.includes('Hardware')
-          ? isDark ? 'bg-emerald-950/20 border-emerald-500/30 text-emerald-400' : 'bg-emerald-50 border-emerald-200 text-emerald-800'
-          : isDark ? 'bg-black/40 border-white/10 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
-      }`}>
-        <div className="flex items-center gap-3">
-          <span className="relative flex h-3 w-3 shrink-0">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+    <div id="scada-dashboard-root" className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-5 pb-6">
+
+      {/* ROW 1: COMPACT TELEMETRY STATUS STRIP + SINGLE SIMULATION CTA */}
+      <div
+        id="scada-hardware-pause-banner"
+        className={`col-span-12 min-w-0 overflow-hidden px-4 py-3 sm:px-5 rounded-2xl border flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 ${
+          isHardwareLive
+            ? isDark
+              ? 'bg-emerald-950/20 border-emerald-500/25 text-emerald-300'
+              : 'bg-emerald-50/90 border-emerald-200 text-emerald-900'
+            : isDark
+              ? 'bg-[#0D0D0F] border-white/5 text-slate-300'
+              : 'bg-white border-slate-200 text-slate-700 shadow-sm'
+        }`}
+      >
+        <div className="flex items-start sm:items-center gap-3 w-full min-w-0 flex-1">
+          <span className="relative flex h-2.5 w-2.5 shrink-0 mt-1 sm:mt-0">
+            {isHardwareLive && (
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+            )}
+            <span
+              className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                isHardwareLive
+                  ? 'bg-emerald-500'
+                  : config?.auto_simulation
+                    ? 'bg-amber-400'
+                    : 'bg-[#3B82F6]'
+              }`}
+            />
           </span>
-          <div className="text-xs">
-            <div className="flex items-center gap-2 font-mono font-bold tracking-wider uppercase">
-              {config?.auto_simulation && (latestReading?.source?.includes('Simulator') || latestReading?.source?.includes('Scenario')) ? (
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] sm:text-xs font-mono font-semibold tracking-wide uppercase leading-snug">
+              {config?.auto_simulation &&
+              (latestReading?.source?.includes('Simulator') || latestReading?.source?.includes('Scenario')) ? (
                 <>
-                  <Activity className="w-3.5 h-3.5 text-amber-400" />
-                  <span>{language === 'en' ? 'TELEMETRY SOURCE: SIMULATOR (CONTROLLED TEST MODE)' : 'SUMBER TELEMETRI: SIMULATOR (MODE PENGUJIAN)'}</span>
+                  <Activity className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span>{language === 'en' ? 'Telemetry: Controlled Simulator' : 'Telemetri: Simulator Pengujian'}</span>
                 </>
-              ) : latestReading?.source?.includes('Hardware') && !isDeviceOffline ? (
+              ) : isHardwareLive ? (
                 <>
-                  <Radio className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>{language === 'en' ? 'TELEMETRY SOURCE: ESP32 HARDWARE (360-SAMPLE BATCH)' : 'SUMBER TELEMETRI: HARDWARE ESP32 (BATCH 360 SAMPEL)'}</span>
+                  <Radio className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>{language === 'en' ? 'Telemetry: ESP32 Hardware Live' : 'Telemetri: Hardware ESP32 Aktif'}</span>
                 </>
               ) : (
                 <>
-                  <Activity className="w-3.5 h-3.5 text-[#3B82F6]" />
-                  <span>{language === 'en' ? 'MONITORING STATUS: STANDBY PAUSED (LATEST REPORT)' : 'STATUS MONITORING: STANDBY PAUSED (LAPORAN TERAKHIR)'}</span>
+                  <Activity className="w-3.5 h-3.5 text-[#3B82F6] shrink-0" />
+                  <span>{language === 'en' ? 'Monitoring: Standby (Latest Report)' : 'Monitoring: Standby (Laporan Terakhir)'}</span>
                 </>
               )}
+              {hasBatchData && (
+                <span className={`font-normal normal-case tracking-normal ${isDark ? 'text-emerald-400/90' : 'text-emerald-700'}`}>
+                  · {rawBatch.length || 360} {language === 'en' ? 'batch pts' : 'titik batch'}
+                </span>
+              )}
             </div>
-            <span className="text-[11px] opacity-80 mt-0.5 block font-sans">
-              {timeAgoText} — {language === 'en' 
-                ? 'No repeated Firestore reads. System stays paused on latest report until new transmission arrives.' 
-                : 'Tidak ada pembacaan Firestore berulang. Sistem tetap terjeda pada laporan terakhir hingga paket transmisi baru masuk.'}
-            </span>
+            <p className={`text-[11px] mt-1 sm:mt-0.5 font-sans leading-relaxed break-words lg:truncate ${isDark ? 'text-zinc-400' : 'text-slate-500'}`}>
+              {timeAgoText} ·{' '}
+              {language === 'en'
+                ? 'Paused on latest telemetry until new transmission arrives.'
+                : 'Menampilkan laporan terakhir hingga paket transmisi baru diterima.'}
+            </p>
           </div>
         </div>
-        
-        <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto justify-end">
-          {hasBatchData && (
-            <span className="px-2.5 py-1 bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 rounded-lg text-[10px] font-mono font-bold shrink-0 flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              {language === 'en' ? `Array of ${rawBatch.length || 360} Points Ready` : `Array ${rawBatch.length || 360} Titik Siap Ditampilkan`}
-            </span>
-          )}
 
-          {/* Primary System Alert Level Badge (Neatly Integrated into Header Banner) */}
-          <div className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold uppercase tracking-wider ${alertBg}`}>
-            <span className={`w-2 h-2 rounded-full ${alertLed} inline-block`} />
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full lg:w-auto lg:justify-end shrink-0">
+          <div className={`flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg text-[10.5px] sm:text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap shrink-0 ${alertBg}`}>
+            <span className={`w-2 h-2 rounded-full ${alertLed} inline-block shrink-0`} />
             <span className="font-mono">{alertLabel}</span>
           </div>
+
+          {onNavigateTab && (
+            <button
+              type="button"
+              onClick={() => onNavigateTab('simulation')}
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#3B82F6] hover:bg-blue-400 px-3.5 py-2 sm:py-1.5 text-xs font-bold text-black transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <span>{language === 'en' ? '9-Node Simulation' : 'Masuk Simulasi 9-Node'}</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </div>
 
-      {/* DETAILED MEASUREMENT GAUGES & METRICS */}
-      <div id="measurement-grid" className="col-span-12 lg:col-span-4 flex flex-col gap-6">
-        
-        {/* Core Gauge: Water Level Channel */}
-        <div id="water-gauge" className={`${themeCard} rounded-2xl p-6 relative overflow-hidden flex flex-col justify-between`}>
-          <div className="flex justify-between items-center mb-4">
-            <span className={`text-[10px] font-bold uppercase tracking-[0.25em] ${themeTextMuted} font-mono`}>
+      {/* DASHBOARD SUB-TAB BAR (OPTION A: 3 CLEAN VIEWPORT-FITTED TABS) */}
+      <div
+        id="dashboard-subtabs"
+        role="tablist"
+        aria-label={language === 'en' ? 'Dashboard sections' : 'Sub-menu Dashboard'}
+        className={`col-span-12 min-w-0 grid grid-cols-3 gap-1.5 sm:gap-2 p-1.5 rounded-2xl border ${
+          isDark ? 'bg-[#0D0D0F] border-white/10' : 'bg-white border-slate-200 shadow-sm'
+        }`}
+      >
+        {([
+          {
+            id: 'map' as const,
+            icon: MapIcon,
+            label: language === 'en' ? 'Map & Water Level' : 'Peta & Elevasi Air',
+            shortLabel: language === 'en' ? 'Map & TMA' : 'Peta & Air',
+            badge: isDeviceOffline ? '-- cm' : `${currentLevel.toFixed(1)} cm`,
+            badgeTone:
+              alertStatus === 'Bahaya'
+                ? 'text-rose-400'
+                : alertStatus === 'Siaga'
+                  ? 'text-amber-400'
+                  : 'text-emerald-400',
+          },
+          {
+            id: 'chart' as const,
+            icon: LineChartIcon,
+            label: language === 'en' ? 'Charts & LSTM Forecast' : 'Grafik & Prediksi LSTM',
+            shortLabel: language === 'en' ? 'LSTM Chart' : 'Grafik LSTM',
+            badge: lstmForecast
+              ? `${language === 'en' ? '6h' : '6J'}: ${lstmForecast.prediction_6h.toFixed(1)} cm`
+              : 'LSTM',
+            badgeTone:
+              lstmForecast?.status === 'Bahaya'
+                ? 'text-rose-400'
+                : lstmForecast?.status === 'Siaga'
+                  ? 'text-amber-400'
+                  : 'text-violet-400',
+          },
+          {
+            id: 'weather' as const,
+            icon: CloudSun,
+            label: language === 'en' ? 'BMKG Weather' : 'Cuaca BMKG',
+            shortLabel: language === 'en' ? 'Weather' : 'Cuaca',
+            badge: activeWeather
+              ? `${activeWeather.temperature_c}°C`
+              : 'BMKG',
+            badgeTone: isSensorSimWeather ? 'text-amber-400' : 'text-sky-400',
+          },
+        ]).map((tab) => {
+          const Icon = tab.icon;
+          const isActive = dashboardSubTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              id={`btn-subtab-${tab.id}`}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              onClick={() => setDashboardSubTab(tab.id)}
+              className={`min-w-0 flex items-center justify-center sm:justify-between gap-1.5 sm:gap-2.5 px-2.5 sm:px-4 py-2 sm:py-2.5 rounded-xl text-left transition-all cursor-pointer ${
+                isActive
+                  ? 'bg-[#3B82F6] text-black shadow-sm'
+                  : isDark
+                    ? 'text-slate-400 hover:text-white hover:bg-white/[0.04]'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/80'
+              }`}
+            >
+              <span className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+                <Icon className={`w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0 ${isActive ? 'text-black' : ''}`} />
+                <span className="hidden sm:inline text-xs font-bold truncate">{tab.label}</span>
+                <span className="sm:hidden text-[11px] font-bold truncate">{tab.shortLabel}</span>
+              </span>
+              <span
+                className={`hidden md:inline-flex items-center gap-1 font-mono text-[10px] font-bold tabular-nums px-2 py-0.5 rounded-md shrink-0 whitespace-nowrap ${
+                  isActive
+                    ? 'bg-black/15 text-black'
+                    : isDark
+                      ? `bg-white/[0.04] ${tab.badgeTone}`
+                      : `bg-slate-100 ${tab.badgeTone}`
+                }`}
+              >
+                {tab.id === 'weather' && isSensorSimWeather && (
+                  <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-black/70' : 'bg-amber-400'}`} />
+                )}
+                {tab.badge}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* SUB-TAB 1: SPATIAL HERO — 2D/3D CILIWUNG CORRIDOR MAP (8 COLS) + LIVE WATER ELEVATION GAUGE (4 COLS) */}
+      {dashboardSubTab === 'map' && (
+      <div id="measurement-grid" className="col-span-12 min-w-0 grid grid-cols-1 lg:grid-cols-12 gap-5 lg:gap-6 items-stretch">
+
+        {/* Left 8 Cols: Interactive 2D/3D Corridor Map (Spatial Hero Above the Fold) */}
+        <div className="col-span-12 lg:col-span-8 min-w-0 flex flex-col">
+          <CiliwungHardwareLiveView
+            embeddedInDashboard
+            theme={theme}
+            language={language}
+            latestReading={latestReading}
+            readings={readingsList}
+            config={config || {}}
+            loadDayHistory={() => loadHardwareHistory24h(db, config?.reference_height || 300)}
+          />
+        </div>
+
+        {/* Right 4 Cols: Core Water Level Gauge & Physical Ultrasonic Cross-Section */}
+        <div id="water-gauge" className={`col-span-12 lg:col-span-4 min-w-0 h-full ${themeCard} rounded-2xl p-4 sm:p-5 lg:p-6 relative overflow-hidden flex flex-col justify-between`}>
+          <div className="flex justify-between items-center gap-2 mb-3">
+            <span className={`text-[10px] font-bold uppercase tracking-[0.22em] ${themeTextMuted} font-mono`}>
               {language === 'en' ? 'Water Surface Elevation' : 'Tinggi Elevasi Air'}
             </span>
-            <div className="flex items-center gap-1.5">
-              {isDeviceOffline ? (
-                <span className="px-2.5 py-1 bg-slate-500/20 border border-slate-500/40 rounded-lg text-[10px] font-mono text-slate-400 font-bold tracking-wider uppercase flex items-center gap-1.5 shadow-sm">
-                  <span className="w-2 h-2 rounded-full bg-slate-400" />
-                  {language === 'en' ? 'DEVICE OFFLINE' : 'PERANGKAT OFFLINE'}
-                </span>
-              ) : latestReading?.source?.includes('Manual') || latestReading?.source?.includes('Peil') ? (
-                <span className="px-2.5 py-1 bg-amber-500/20 border border-amber-500/40 rounded-lg text-[10px] font-mono text-amber-400 font-bold tracking-wider uppercase flex items-center gap-1.5 shadow-sm">
-                  <ClipboardCheck className="w-3 h-3 text-amber-400" />
-                  MANUAL PEIL SCHAAL
-                </span>
-              ) : latestReading?.source?.includes('Hardware') ? (
-                <span className="px-2.5 py-1 bg-emerald-500/20 border border-emerald-500/40 rounded-lg text-[10px] font-mono text-emerald-400 font-bold tracking-wider uppercase flex items-center gap-1.5 shadow-sm">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                  LIVE HARDWARE
-                </span>
-              ) : !config?.auto_simulation ? (
-                <span className="px-2.5 py-1 bg-amber-500/10 border border-amber-500/30 rounded-lg text-[9px] font-mono text-amber-400 tracking-wider uppercase flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                  STANDBY (READY FOR ESP32)
-                </span>
-              ) : (
-                <span className={`px-2 py-0.5 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-100 border-slate-200'} rounded text-[9px] font-mono text-[#3B82F6] tracking-wider uppercase`}>
-                  {language === 'en' ? 'SIMULATOR ACTIVE' : 'SIMULATOR AKTIF'}
-                </span>
-              )}
-            </div>
+            <span className={`text-[10px] font-mono uppercase tracking-wider whitespace-nowrap shrink-0 ${
+              isDeviceOffline
+                ? 'text-slate-400'
+                : latestReading?.source?.includes('Manual') || latestReading?.source?.includes('Peil')
+                  ? 'text-amber-400 font-semibold'
+                  : latestReading?.source?.includes('Hardware')
+                    ? 'text-emerald-400 font-semibold'
+                    : !config?.auto_simulation
+                      ? 'text-amber-400'
+                      : 'text-[#3B82F6]'
+            }`}>
+              {isDeviceOffline
+                ? (language === 'en' ? 'OFFLINE' : 'OFFLINE')
+                : latestReading?.source?.includes('Manual') || latestReading?.source?.includes('Peil')
+                  ? 'MANUAL PEIL'
+                  : latestReading?.source?.includes('Hardware')
+                    ? 'LIVE ESP32'
+                    : !config?.auto_simulation
+                      ? 'STANDBY'
+                      : 'SIMULATOR'}
+            </span>
           </div>
-          
+
           <div className="flex items-baseline justify-between gap-4">
             <div className="flex flex-col">
-              <span className={`text-5xl font-sans font-light tracking-tighter leading-none ${isDark ? 'text-white' : 'text-slate-900'}`}>
+              <span className={`text-5xl font-sans font-light tracking-tighter leading-none tabular-nums ${isDark ? 'text-white' : 'text-slate-900'}`}>
                 {isDeviceOffline ? (
                   <>--<span className="text-lg font-normal text-slate-400"> cm</span></>
                 ) : (
@@ -1184,31 +1395,30 @@ export default function SCADADashboard({
               <span className={`text-[11px] ${themeTextSub} mt-2 font-sans flex items-center gap-1.5`}>
                 {isDeviceOffline ? (
                   <span className="text-slate-400 font-mono">
-                    {language === 'en' ? 'Device offline (>15 mins). Telemetry paused on standby.' : 'Perangkat offline (>15 mnt). Data telemetri terakhir dibekukan.'}
+                    {language === 'en' ? 'Device offline (>15 mins). Telemetry paused.' : 'Perangkat offline (>15 mnt). Data dibekukan.'}
                   </span>
                 ) : (
                   <>
                     {latestReading && latestReading.water_level >= thresholdSiaga ? (
-                      <TrendingUp className="w-3.5 h-3.5 text-rose-500 animate-bounce" />
+                      <TrendingUp className="w-3.5 h-3.5 text-rose-500 shrink-0" />
                     ) : (
-                      <TrendingDown className="w-3.5 h-3.5 text-emerald-500" />
+                      <TrendingDown className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
                     )}
                     {latestReading?.source?.includes('Manual') ? (
-                      <span className="text-amber-400 font-bold">
+                      <span className="text-amber-400 font-semibold">
                         {language === 'en' ? 'Staff: ' : 'Petugas: '}{latestReading.operator || (language === 'en' ? 'Field Staff' : 'Staf Lapangan')}
                       </span>
                     ) : latestReading?.distance != null ? (
                       language === 'en'
                         ? `Sensor Gap: ${latestReading.distance} cm (${latestReading.source || 'RTU'})`
-                        : `Jarak Pantul Sensor: ${latestReading.distance} cm (${latestReading.source || 'RTU'})`
+                        : `Jarak Sensor: ${latestReading.distance} cm (${latestReading.source || 'RTU'})`
                     ) : (
-                      language === 'en' ? 'Ultrasonic Echo Precision: ±0.1 cm' : 'Presisi Echo Ultrasonik: ±0.1 cm'
+                      language === 'en' ? 'Ultrasonic Precision: ±0.1 cm' : 'Presisi Ultrasonik: ±0.1 cm'
                     )}
                   </>
                 )}
               </span>
 
-              {/* Extra Field Notes if Manual Entry */}
               {latestReading?.source?.includes('Manual') && latestReading.notes && (
                 <div className="mt-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-[10px] font-sans text-amber-300 leading-snug">
                   {latestReading.notes}
@@ -1218,12 +1428,14 @@ export default function SCADADashboard({
           </div>
 
           {/* PHYSICAL CROSS-SECTION GAUGE DIAGRAM */}
-          <div className={`w-full h-60 ${isDark ? 'bg-black/50 border-white/5' : 'bg-slate-100/60 border-slate-200'} rounded-2xl border p-4 relative overflow-hidden flex flex-col justify-between mt-4 shadow-inner`}>
-            
+          <div className={`w-full flex-1 min-h-[250px] ${isDark ? 'bg-black/50 border-white/5' : 'bg-slate-100/60 border-slate-200'} rounded-xl border p-4 relative overflow-hidden flex flex-col justify-between mt-4 shadow-inner`}>
+
             {/* 1. Bridge/Beam concrete ceiling & Sensor Probe */}
-            <div className="absolute top-0 left-0 right-0 h-7 bg-zinc-700 border-b border-zinc-600 flex items-center justify-center z-10 shadow-sm">
-              <span className="text-[7px] font-mono text-zinc-300 tracking-widest uppercase">TIANG PIPA & LENGAN BOOM DRAINASE KUKUSAN</span>
-              
+            <div className="absolute top-0 left-0 right-0 h-7 bg-zinc-700 border-b border-zinc-600 flex items-center justify-center px-2 z-10 shadow-sm">
+              <span className="text-[7px] font-mono text-zinc-300 tracking-widest uppercase truncate">
+                {language === 'en' ? 'KUKUSAN DRAINAGE PIPE POLE & BOOM ARM' : 'TIANG PIPA & LENGAN BOOM DRAINASE KUKUSAN'}
+              </span>
+
               {/* JSN-SR04T Sensor Probe Visual */}
               <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 w-10 h-5 bg-zinc-800 rounded-b-md border-x border-b border-zinc-600 flex justify-around items-center px-1">
                 <div className="w-3 h-3 rounded-full bg-zinc-700 border border-[#3B82F6]/30 flex items-center justify-center">
@@ -1244,28 +1456,24 @@ export default function SCADADashboard({
             </div>
 
             {/* 3. The Water Body & Animated Surface */}
-            <div 
+            <div
               className="absolute bottom-0 left-0 right-0 z-20"
-              style={{ 
+              style={{
                 height: `${Math.min(85, Math.max(15, (currentLevel / (config?.reference_height || 300)) * 100))}%`,
-                transition: 'height 1200ms cubic-bezier(0.4, 0, 0.2, 1)'
+                transition: 'height 1200ms cubic-bezier(0.4, 0, 0.2, 1)',
               }}
             >
-              {/* Animated wave header */}
               <div className="absolute top-0 left-0 right-0 h-4 -mt-3.5 pointer-events-none overflow-hidden">
                 <svg className="w-[200%] h-full fill-blue-500/30 animate-pulse" viewBox="0 0 1200 120" preserveAspectRatio="none">
                   <path d="M0,60 C150,100 350,20 500,60 C650,100 850,20 1000,60 L1200,60 L1200,120 L0,120 Z" />
                 </svg>
               </div>
 
-              {/* Main Water Body */}
               <div className={`w-full h-full ${
                 alertStatus === 'Bahaya' ? 'bg-gradient-to-t from-rose-600/80 to-rose-500/70 border-t-2 border-rose-400' :
                 alertStatus === 'Siaga' ? 'bg-gradient-to-t from-amber-600/80 to-amber-500/70 border-t-2 border-amber-400' :
                 'bg-gradient-to-t from-blue-600/80 to-blue-500/70 border-t-2 border-blue-400'
               } flex flex-col justify-end border-t shadow-inner`}>
-                
-                {/* Sandy/Soil Riverbed ground at the absolute bottom */}
                 <div className="w-full h-4 bg-amber-950/30 border-t border-amber-900/40 flex items-center justify-center">
                   <span className="text-[6px] font-mono text-amber-200/50 tracking-widest uppercase">
                     {language === 'en' ? 'RIVERBED BASELINE' : 'DASAR SUNGAI (RIVERBED)'}
@@ -1275,22 +1483,20 @@ export default function SCADADashboard({
             </div>
 
             {/* 4. Overlaid threshold markings (Siaga, Bahaya) */}
-            {/* Siaga Line */}
-            <div 
+            <div
               className="absolute left-0 right-0 border-t border-dashed border-amber-500/70 z-30 pointer-events-none"
-              style={{ 
-                bottom: `${(thresholdSiaga / (config?.reference_height || 300)) * 100}%` 
+              style={{
+                bottom: `${(thresholdSiaga / (config?.reference_height || 300)) * 100}%`,
               }}
             >
               <div className="bg-amber-500 text-black text-[6px] font-mono font-bold px-1.5 py-0.5 rounded absolute right-3 -top-2.5 shadow-sm uppercase tracking-wider">
                 {language === 'en' ? 'ALERT' : 'SIAGA'}: {thresholdSiaga} cm
               </div>
             </div>
-            {/* Bahaya Line */}
-            <div 
+            <div
               className="absolute left-0 right-0 border-t border-dashed border-rose-500/80 z-30 pointer-events-none"
-              style={{ 
-                bottom: `${(thresholdBahaya / (config?.reference_height || 300)) * 100}%` 
+              style={{
+                bottom: `${(thresholdBahaya / (config?.reference_height || 300)) * 100}%`,
               }}
             >
               <div className="bg-rose-600 text-white text-[6px] font-mono font-bold px-1.5 py-0.5 rounded absolute right-3 -top-2.5 shadow-sm uppercase tracking-wider">
@@ -1300,25 +1506,23 @@ export default function SCADADashboard({
 
             {/* 5. Dimensions & Annotations overlay */}
             <div className="absolute top-10 bottom-1 left-0 right-0 px-3 flex justify-between pointer-events-none z-30 font-mono">
-              {/* AIR GAP (Jarak ke Sensor) annotation */}
               <div className="flex flex-col justify-start items-start w-1/2">
                 <div className="bg-black/85 border border-white/10 rounded px-1.5 py-0.5 text-left shadow">
                   <span className="text-[6px] text-slate-400 block uppercase leading-none mb-0.5">
                     {language === 'en' ? 'Sensor Gap to Water (d)' : 'Jarak Sensor ke Air (d)'}
                   </span>
-                  <span className="text-[10px] font-bold text-sky-400 leading-none">
+                  <span className="text-[10px] font-bold text-sky-400 leading-none tabular-nums">
                     {isDeviceOffline ? '-- cm' : `${config ? Math.max(0, config.reference_height - currentLevel) : 300 - currentLevel} cm`}
                   </span>
                 </div>
               </div>
 
-              {/* WATER LEVEL (Tinggi Air) annotation */}
               <div className="flex flex-col justify-end items-end w-1/2">
                 <div className="bg-black/85 border border-white/10 rounded px-1.5 py-0.5 text-right shadow">
                   <span className="text-[6px] text-slate-400 block uppercase leading-none mb-0.5">
                     {language === 'en' ? 'Water Elevation (h)' : 'Elevasi Air (h)'}
                   </span>
-                  <span className="text-[10px] font-bold text-emerald-400 leading-none">
+                  <span className="text-[10px] font-bold text-emerald-400 leading-none tabular-nums">
                     {isDeviceOffline ? '-- cm' : `${currentLevel} cm`}
                   </span>
                 </div>
@@ -1326,277 +1530,602 @@ export default function SCADADashboard({
             </div>
 
             {/* Total Height Tag */}
-            <div className="absolute bottom-5 left-3 bg-zinc-800/90 border border-zinc-700 text-[6px] font-mono text-zinc-300 px-1.5 py-0.5 rounded z-30 shadow-md">
+            <div className="absolute bottom-5 left-3 bg-zinc-800/90 border border-zinc-700 text-[6px] font-mono text-zinc-300 px-1.5 py-0.5 rounded z-30 shadow-md tabular-nums">
               H_REF: {config ? config.reference_height : 300} cm
             </div>
 
           </div>
 
-          <div className={`grid grid-cols-2 gap-2 mt-4 pt-3 border-t ${themeBorder} text-[10px] font-mono`}>
+          <div className={`grid grid-cols-2 gap-2 mt-4 pt-3 border-t ${themeBorder} text-[10px] font-mono tabular-nums`}>
             <div className="flex flex-col">
-              <span className={themeTextMuted}>{language === 'en' ? 'Alert Threshold:' : 'Ambang Siaga:'}</span>
+              <span className={themeTextMuted}>{language === 'en' ? 'Alert Threshold' : 'Ambang Siaga'}</span>
               <span className="text-amber-500 font-semibold mt-0.5">{thresholdSiaga} cm</span>
             </div>
             <div className="flex flex-col">
-              <span className={themeTextMuted}>{language === 'en' ? 'Danger Threshold:' : 'Ambang Bahaya:'}</span>
+              <span className={themeTextMuted}>{language === 'en' ? 'Danger Threshold' : 'Ambang Bahaya'}</span>
               <span className="text-rose-500 font-semibold mt-0.5">{thresholdBahaya} cm</span>
             </div>
           </div>
         </div>
+      </div>
+      )}
 
-        {/* Real-time BMKG Weather Forecast with Google Search Grounding */}
-        <div id="bmkg-gauge" className={`${themeCard} rounded-2xl p-6 relative overflow-hidden flex flex-col justify-between`}>
-          <div>
-            <div className="flex justify-between items-start mb-4">
-              <div className="flex flex-col">
-                <span className={`text-[10px] font-bold uppercase tracking-[0.25em] ${themeTextMuted} font-mono`}>
-                  {language === 'en' ? 'Official BMKG Forecast & Grounding' : 'Prakiraan BMKG & Grounding Cuaca'}
+      {/* SUB-TAB 3: OFFICIAL BMKG PUBLIC API WEATHER FORECAST (WITH SENSOR-SYNCED DEMO MODE) + HYDROLOGICAL CORRELATION */}
+      {dashboardSubTab === 'weather' && (
+      <div className="col-span-12 min-w-0 flex flex-col gap-4 lg:gap-5">
+      <div
+        id="bmkg-gauge"
+        className={`w-full min-w-0 ${themeCard} ${
+          isSensorSimWeather ? 'border-amber-500/30' : ''
+        } rounded-2xl p-4 sm:p-5 lg:p-6 relative overflow-hidden transition-colors`}
+      >
+        <div className={`flex flex-col md:flex-row md:items-center md:justify-between gap-3 pb-4 mb-5 border-b ${themeBorder}`}>
+          <div className="flex flex-col gap-1 min-w-0">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+              <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeTextMuted} font-mono`}>
+                {isSensorSimWeather
+                  ? (language === 'en' ? 'Weather Simulation · Sensor-Linked' : 'Simulasi Cuaca · Sinkron Sensor')
+                  : (language === 'en' ? 'Official BMKG Weather Forecast' : 'Prakiraan Cuaca Resmi BMKG')}
+              </span>
+              {activeWeather?.valid_hour_wib && (
+                <span className={`inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider font-mono ${isSensorSimWeather ? 'text-amber-400' : 'text-sky-400'}`}>
+                  <span>
+                    · {isSensorSimWeather
+                      ? `ESP32 ${currentLevel.toFixed(1)} cm`
+                      : (language === 'en' ? `Slot ${activeWeather.valid_hour_wib}` : `Prakiraan ${activeWeather.valid_hour_wib}`)}
+                  </span>
+                  <span
+                    title={
+                      isSensorSimWeather
+                        ? (language === 'en'
+                            ? 'Simulated weather synced to live ESP32 water elevation for indoor hardware demos'
+                            : 'Simulasi cuaca mengikuti tinggi air sensor ESP32 untuk demo hardware di dalam ruangan')
+                        : (language === 'en'
+                            ? `Official BMKG 3-hourly forecast slot (${activeWeather.valid_at})`
+                            : `Slot prakiraan 3-jaman resmi BMKG (${activeWeather.valid_at})`)
+                    }
+                  >
+                    <Info className={`w-3 h-3 cursor-help ${isSensorSimWeather ? 'text-amber-400' : 'text-sky-400'}`} />
+                  </span>
                 </span>
-                <span className="font-mono text-[8px] text-[#3B82F6] uppercase tracking-wider mt-0.5">gemini-3.5-flash // Search Grounded</span>
-              </div>
-              <button 
-                id="btn-sync-weather"
-                onClick={fetchLiveWeather}
-                disabled={loadingWeather}
-                className={`p-1.5 rounded-lg border transition-all ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300 border-white/10' : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-700'}`}
-                title={language === 'en' ? 'Synchronize Live Weather Data' : 'Sinkronisasi Data Cuaca Terkini'}
+              )}
+            </div>
+
+            <span className={`font-mono text-[10px] tracking-wide leading-snug ${isSensorSimWeather ? 'text-amber-400/90' : 'text-[#3B82F6]'}`}>
+              {isSensorSimWeather
+                ? (language === 'en'
+                    ? `Simulated from ESP32 elevation (${localizedAlertStatus}) · Not live BMKG feed`
+                    : `Simulasi berbasis elevasi ESP32 (${localizedAlertStatus}) · Bukan feed live BMKG`)
+                : liveWeather?.source === 'Open-Meteo'
+                  ? (language === 'en' ? 'Open-Meteo Live Fallback · BMKG Feed Currently Empty' : 'Fallback Open-Meteo · Feed API BMKG Sedang Kosong')
+                  : `${language === 'en' ? 'BMKG Public API' : 'API Publik BMKG'} · ADM4 ${liveWeather?.adm4 || '32.76.06.1002'}`}
+            </span>
+          </div>
+
+          {/* Right Header Controls: Sync Info (left on sm+) + Segmented Mode Switch anchored far-right (zero layout shift) */}
+          <div className="flex flex-col sm:flex-row sm:items-center md:justify-end gap-2.5 w-full md:w-auto shrink-0">
+            <div
+              role="group"
+              aria-label={language === 'en' ? 'Weather data source mode' : 'Mode sumber data cuaca'}
+              className={`order-1 sm:order-2 grid grid-cols-2 sm:inline-flex w-full sm:w-auto p-1 rounded-xl border ${
+                isDark ? 'bg-black/40 border-white/10' : 'bg-slate-100 border-slate-200'
+              }`}
+            >
+              <button
+                type="button"
+                onClick={() => setWeatherMode('live')}
+                className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-mono font-bold transition-all cursor-pointer whitespace-nowrap ${
+                  !isSensorSimWeather
+                    ? 'bg-[#3B82F6] text-black shadow-sm'
+                    : isDark
+                      ? 'text-slate-400 hover:text-slate-200'
+                      : 'text-slate-600 hover:text-slate-900'
+                }`}
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${loadingWeather ? 'animate-spin' : ''}`} />
+                <span className={`w-1.5 h-1.5 rounded-full ${!isSensorSimWeather ? 'bg-black/70' : 'bg-emerald-400'}`} />
+                BMKG Live
+              </button>
+              <button
+                type="button"
+                onClick={() => setWeatherMode('sensor_sim')}
+                className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-mono font-bold transition-all cursor-pointer whitespace-nowrap ${
+                  isSensorSimWeather
+                    ? 'bg-amber-400 text-black shadow-sm'
+                    : isDark
+                      ? 'text-slate-400 hover:text-slate-200'
+                      : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${isSensorSimWeather ? 'bg-black/70' : 'bg-amber-400'}`} />
+                {language === 'en' ? 'Sensor Sync' : 'Sinkron Sensor'}
               </button>
             </div>
 
-            {loadingWeather ? (
-              <div className="py-6 flex flex-col items-center justify-center">
-                <RefreshCw className="w-5 h-5 animate-spin text-[#3B82F6] mb-2" />
-                <span className={`text-[9px] font-mono uppercase tracking-wider ${themeTextMuted} text-center px-4`}>
-                  {language === 'en'
-                    ? 'Connecting to Google Search to retrieve live upstream Bogor-Depok weather...'
-                    : 'Menghubungkan ke Google Search untuk mencari cuaca terkini hulu Bogor-Depok...'}
-                </span>
-              </div>
-            ) : liveWeather ? (
-              <div className="space-y-4">
-                {/* Weather Header: SAAT INI */}
-                <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-sky-500 font-sans">
-                  <span>{language === 'en' ? 'CURRENT OBSERVATION' : 'SAAT INI'}</span>
-                  <span title={language === 'en' ? 'Integrated upstream river basin weather' : 'Informasi cuaca terpadu hulu aliran sungai Depok'}>
-                    <Info className="w-3.5 h-3.5 text-sky-400 cursor-help" />
+            {!isSensorSimWeather && (
+              <div className="order-2 sm:order-1 flex items-center justify-between sm:justify-end gap-2.5">
+                {liveWeather?.last_updated && (
+                  <span className={`text-[10px] font-mono tabular-nums whitespace-nowrap ${themeTextMuted}`}>
+                    {language === 'en' ? 'Synced: ' : 'Disinkronkan: '}{liveWeather.last_updated}
                   </span>
-                </div>
-
-                {/* Major Weather Information with Visual Icon and Temp */}
-                <div className="flex items-center gap-4 py-1">
-                  {/* Custom weather icon representation */}
-                  <div className="relative flex-shrink-0">
-                    {liveWeather.weather_icon ? (
-                      <img 
-                        src={liveWeather.weather_icon} 
-                        alt={liveWeather.condition} 
-                        className="w-14 h-14 object-contain filter drop-shadow" 
-                        referrerPolicy="no-referrer"
-                      />
-                    ) : (
-                      <CloudRain className="w-14 h-14 text-[#3B82F6] filter drop-shadow animate-pulse" />
-                    )}
-                    <div className="absolute -top-1 -right-1 w-5 h-5 bg-amber-400/10 rounded-full blur-sm" />
-                  </div>
-
-                    <div>
-                    <div className="flex items-baseline flex-wrap gap-x-2">
-                      <span className={`text-3xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                        {liveWeather.temperature_c}°C
-                      </span>
-                      <span className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
-                        {language === 'en' ? translateConditionToEn(liveWeather.condition) : liveWeather.condition}
-                      </span>
-                    </div>
-                    <span className={`text-[10px] ${themeTextSub} block mt-0.5`}>
-                      {language === 'en' ? 'in ' : 'di '}{liveWeather.location_name || (language === 'en' ? 'Depok & upstream Ciliwung' : 'Depok & wilayah hulu Ciliwung')}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Grid layout for requested weather parameters */}
-                <div className="grid grid-cols-2 gap-2 mt-2">
-                  {/* 1. Kelembapan */}
-                  <div className={`flex items-center gap-2 px-2.5 py-1.5 border ${isDark ? 'bg-white/5 border-white/5' : 'bg-slate-50 border-slate-100'} rounded-xl`}>
-                    <div className="text-sky-500 p-1 bg-sky-500/10 rounded-lg">
-                      <Droplet className="w-3.5 h-3.5" />
-                    </div>
-                    <div className="flex flex-col text-[9px] leading-tight">
-                      <span className={themeTextMuted}>{language === 'en' ? 'Humidity:' : 'Kelembapan:'}</span>
-                      <span className={`font-bold mt-0.5 ${isDark ? 'text-white' : 'text-slate-800'}`}>
-                        {liveWeather.humidity_percent}%
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* 2. Kecepatan Angin */}
-                  <div className={`flex items-center gap-2 px-2.5 py-1.5 border ${isDark ? 'bg-white/5 border-white/5' : 'bg-slate-50 border-slate-100'} rounded-xl`}>
-                    <div className="text-[#3B82F6] p-1 bg-blue-500/10 rounded-lg">
-                      <Wind className="w-3.5 h-3.5" />
-                    </div>
-                    <div className="flex flex-col text-[9px] leading-tight">
-                      <span className={themeTextMuted}>{language === 'en' ? 'Wind Speed:' : 'Kecepatan Angin:'}</span>
-                      <span className={`font-bold mt-0.5 ${isDark ? 'text-white' : 'text-slate-800'}`}>
-                        {liveWeather.wind_speed_kph !== undefined ? liveWeather.wind_speed_kph.toLocaleString(language === 'en' ? 'en-US' : 'id-ID') : '6.7'} km/h
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* 3. Arah Angin dari */}
-                  <div className={`flex items-center gap-2 px-2.5 py-1.5 border ${isDark ? 'bg-white/5 border-white/5' : 'bg-slate-50 border-slate-100'} rounded-xl col-span-1`}>
-                    <div className="text-indigo-400 p-1 bg-indigo-500/10 rounded-lg">
-                      <Compass className="w-3.5 h-3.5" />
-                    </div>
-                    <div className="flex flex-col text-[9px] leading-tight">
-                      <span className={themeTextMuted}>{language === 'en' ? 'Wind Direction:' : 'Arah Angin dari:'}</span>
-                      <span className={`font-bold mt-0.5 ${isDark ? 'text-white' : 'text-slate-800'}`}>
-                        {liveWeather.wind_direction 
-                          ? (language === 'en' ? translateWindDirectionToEn(liveWeather.wind_direction) : liveWeather.wind_direction) 
-                          : (language === 'en' ? 'South ↑' : 'Selatan ↑')}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* 4. Jarak Pandang */}
-                  <div className={`flex items-center gap-2 px-2.5 py-1.5 border ${isDark ? 'bg-white/5 border-white/5' : 'bg-slate-50 border-slate-100'} rounded-xl`}>
-                    <div className="text-emerald-500 p-1 bg-emerald-500/10 rounded-lg">
-                      <Eye className="w-3.5 h-3.5" />
-                    </div>
-                    <div className="flex flex-col text-[9px] leading-tight">
-                      <span className={themeTextMuted}>{language === 'en' ? 'Visibility:' : 'Jarak Pandang:'}</span>
-                      <span className={`font-bold mt-0.5 ${isDark ? 'text-white' : 'text-slate-800'}`}>
-                        {liveWeather.visibility_km || '< 9 km'}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className={`text-[10px] ${themeTextMuted} font-mono mt-1`}>
-                  {language === 'en' ? 'Precipitation: ' : 'Curah hujan: '}{liveWeather.precipitation_mm}
-                </div>
-
-                {/* Weather Alerts Ticker */}
-                {liveWeather.alerts && liveWeather.alerts.length > 0 && (
-                  <div className="space-y-1.5">
-                    <span className="text-[8px] font-bold text-rose-500 font-mono tracking-wider uppercase block">
-                      {language === 'en' ? 'Active Early Warnings:' : 'Peringatan Dini Aktif:'}
-                    </span>
-                    <div className={`p-2.5 rounded-lg border border-rose-500/15 bg-rose-500/5 text-[10px] ${isDark ? 'text-rose-300' : 'text-rose-700'} leading-relaxed space-y-1`}>
-                      {liveWeather.alerts.map((alert, i) => (
-                        <div key={i} className="flex items-start gap-1.5">
-                          <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0 mt-0.5" />
-                          <span>{alert}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
                 )}
-
-                <div className={`text-[10px] font-sans leading-relaxed ${isDark ? 'text-slate-400' : 'text-slate-600'} border-t border-dashed ${themeBorder} pt-3`}>
-                  <p className="italic">"{formatWeatherSummary(liveWeather, language)}"</p>
-                  <span className={`block text-[8px] font-mono ${themeTextMuted} mt-2 text-right`}>
-                    {language === 'en' ? 'Updated: ' : 'Diperbarui: '}{liveWeather.last_updated}
-                  </span>
-                </div>
-              </div>
-            ) : (
-              <div className={`text-center py-6 text-[10px] font-mono ${themeTextMuted}`}>
-                {language === 'en' ? 'Failed to load weather. Click sync button above.' : 'Gagal memuat info cuaca hulu. Klik tombol sync di atas.'}
+                <button
+                  id="btn-sync-weather"
+                  onClick={() => fetchLiveWeather(language, false, true)}
+                  disabled={loadingWeather}
+                  className={`p-2 rounded-lg border transition-all cursor-pointer shrink-0 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300' : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-700'}`}
+                  title={language === 'en' ? 'Refresh Official BMKG Data' : 'Muat Ulang Data Resmi BMKG'}
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingWeather ? 'animate-spin' : ''}`} />
+                </button>
               </div>
             )}
           </div>
         </div>
 
-      </div>
-
-      {/* HIGH-FIDELITY CHRONOLOGICAL PLOT & FORECASTS */}
-      <div id="scada-charts-forecasts" className="col-span-12 lg:col-span-8 flex flex-col gap-6">
-        
-        {/* Real-time & Historical Plot */}
-        <div id="scada-plot-container" className={`${themeCard} rounded-2xl p-6 flex flex-col justify-between`}>
-          <div className="flex justify-between items-center mb-5 flex-wrap gap-2">
-            <div className="flex items-center gap-2">
-              <span className={`text-[10px] font-bold uppercase tracking-[0.25em] ${themeTextMuted} font-mono`}>
-                {language === 'en' ? 'Live Water Elevation Curve vs Critical Limits' : 'Kurva Elevasi Air Terkini vs Batas Kritis'}
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2 flex-wrap">
-              {/* Toggle Mode: Elevasi vs Raw Ultrasonik */}
-              <div className={`flex items-center gap-1 border ${isDark ? 'border-white/5 bg-black/25' : 'border-slate-200 bg-slate-100'} rounded-lg p-0.5 text-[10px] font-mono`}>
-                <button
-                  id="btn-mode-elevation"
-                  onClick={() => setChartViewMode('elevation')}
-                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
-                    chartViewMode === 'elevation'
-                      ? 'bg-[#3B82F6] text-black font-bold'
-                      : `${themeTextSub} hover:text-[#3B82F6]`
-                  }`}
-                  title={language === 'en' ? 'Show Water Surface Elevation (TMA) in cm' : 'Tampilkan grafik Tinggi Elevasi Muka Air (TMA) dalam cm'}
-                >
-                  {language === 'en' ? 'Elevation (TMA)' : 'Elevasi Air (TMA)'}
-                </button>
-                <button
-                  id="btn-mode-raw"
-                  onClick={() => setChartViewMode('raw_ultrasonic')}
-                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer flex items-center gap-1.5 ${
-                    chartViewMode === 'raw_ultrasonic'
-                      ? 'bg-emerald-500 text-black font-bold'
-                      : `${themeTextSub} hover:text-emerald-400`
-                  }`}
-                  title={language === 'en' ? 'Show raw JSN-SR04T reflection distance in cm' : 'Tampilkan data mentah jarak pantul sensor ultrasonik JSN-SR04T (cm)'}
-                >
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  {language === 'en' ? 'Raw Ultrasonic (d)' : 'Raw Ultrasonik (d)'}
-                </button>
+        {!isSensorSimWeather && loadingWeather ? (
+          <div className="py-6 flex flex-col items-center justify-center">
+            <RefreshCw className="w-5 h-5 animate-spin text-[#3B82F6] mb-2" />
+            <span className={`text-[10px] font-mono uppercase tracking-wider ${themeTextMuted} text-center px-4`}>
+              {language === 'en'
+                ? 'Fetching official weather forecast from BMKG public API...'
+                : 'Mengambil data prakiraan cuaca resmi dari API publik BMKG...'}
+            </span>
+          </div>
+        ) : activeWeather ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-12 gap-5 lg:gap-6 items-center">
+            {/* Left Zone: Weather Hero (Temperature, Condition & Location) */}
+            <div className="md:col-span-1 lg:col-span-4 flex items-center justify-center gap-4">
+              <div className="relative flex-shrink-0">
+                {activeWeather.weather_icon ? (
+                  <img
+                    src={activeWeather.weather_icon}
+                    alt={activeWeather.condition}
+                    className="w-16 h-16 object-contain filter drop-shadow"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <CloudRain className="w-16 h-16 text-[#3B82F6] filter drop-shadow" />
+                )}
               </div>
 
-              <div className={`flex items-center gap-1 border ${isDark ? 'border-white/5 bg-black/25' : 'border-slate-200 bg-slate-100'} rounded-lg p-0.5 text-[10px] font-mono`}>
-                <button 
-                  id="btn-range-realtime"
-                  onClick={() => {
-                    setUseBatch360Mode(false);
-                    setChartRange('realtime');
-                  }}
-                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${(!useBatch360Mode && chartRange === 'realtime') ? 'bg-[#3B82F6] text-black font-bold' : `${themeTextSub} hover:text-[#3B82F6]`}`}
-                  title={language === 'en' ? 'High resolution chart showing last 20 telemetry readings' : 'Grafik resolusi tinggi menampilkan 20 pembacaan telemetri terakhir'}
-                >
-                  {language === 'en' ? 'Real-time (20 Pts)' : 'Terkini (20 Poin)'}
-                </button>
-                <button 
-                  id="btn-range-24h"
-                  onClick={() => {
-                    setUseBatch360Mode(false);
-                    setChartRange('24h');
-                  }}
-                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${(!useBatch360Mode && chartRange === '24h') ? 'bg-[#3B82F6] text-black font-bold' : `${themeTextSub} hover:text-[#3B82F6]`}`}
-                  title={language === 'en' ? 'Cumulative 24-hour water elevation trend' : 'Grafik histori elevasi air akumulatif dari 24 jam terakhir'}
-                >
-                  {language === 'en' ? '24h Trend' : 'Tren 24 Jam'}
-                </button>
-                <button 
-                  id="btn-range-batch360"
-                  onClick={() => setUseBatch360Mode(!useBatch360Mode)}
-                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer flex items-center gap-1 ${useBatch360Mode ? 'bg-emerald-500 text-black font-bold' : `${themeTextSub} hover:text-emerald-400`}`}
-                  title={language === 'en' ? 'Visualize 360 continuous sample array in 1 ESP32 batch' : 'Tampilkan visualisasi 360 array sampel kontinu dalam 1 siklus batch ESP32'}
-                >
-                  <span className={`w-1.5 h-1.5 rounded-full ${useBatch360Mode ? 'bg-black' : 'bg-emerald-400 animate-pulse'}`} />
-                  {language === 'en' ? '360-Pt Batch' : 'Batch 360 Titik'}
-                </button>
+              <div className="min-w-0">
+                <div className="flex items-baseline flex-wrap gap-x-2">
+                  <span className={`text-4xl font-bold tracking-tight tabular-nums ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    {activeWeather.temperature_c}°C
+                  </span>
+                  <span className={`text-sm font-semibold ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>
+                    {activeWeather.condition}
+                  </span>
+                </div>
+                <span className={`text-[11px] ${themeTextSub} block mt-1 truncate`}>
+                  {language === 'en' ? 'in ' : 'di '}{activeWeather.location_name}
+                </span>
+                <div className={`flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] ${themeTextMuted} font-mono mt-1 tabular-nums`}>
+                  <span>
+                    {language === 'en' ? 'Precip: ' : 'Curah hujan: '}{activeWeather.precipitation_mm ?? '—'}
+                  </span>
+                  {typeof activeWeather.cloud_cover_percent === 'number' && (
+                    <span>
+                      {language === 'en' ? 'Cloud: ' : 'Tutupan awan: '}{activeWeather.cloud_cover_percent}%
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Middle Zone: 2x2 Atmospheric Telemetry Grid */}
+            <div className="md:col-span-1 lg:col-span-4 grid grid-cols-2 gap-2.5">
+              <div className={`flex items-center gap-2.5 px-3 py-2.5 border ${isDark ? 'bg-white/[0.02] border-white/5' : 'bg-slate-50 border-slate-100'} rounded-xl`}>
+                <div className="text-sky-500 p-1.5 bg-sky-500/10 rounded-lg shrink-0">
+                  <Droplet className="w-3.5 h-3.5" />
+                </div>
+                <div className="flex flex-col text-[10px] leading-tight min-w-0">
+                  <span className={themeTextMuted}>{language === 'en' ? 'Humidity' : 'Kelembapan'}</span>
+                  <span className={`font-bold mt-0.5 tabular-nums ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                    {typeof activeWeather.humidity_percent === 'number' ? `${activeWeather.humidity_percent}%` : '—'}
+                  </span>
+                </div>
+              </div>
+
+              <div className={`flex items-center gap-2.5 px-3 py-2.5 border ${isDark ? 'bg-white/[0.02] border-white/5' : 'bg-slate-50 border-slate-100'} rounded-xl`}>
+                <div className="text-[#3B82F6] p-1.5 bg-blue-500/10 rounded-lg shrink-0">
+                  <Wind className="w-3.5 h-3.5" />
+                </div>
+                <div className="flex flex-col text-[10px] leading-tight min-w-0">
+                  <span className={themeTextMuted}>{language === 'en' ? 'Wind Speed' : 'Kecepatan Angin'}</span>
+                  <span className={`font-bold mt-0.5 tabular-nums ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                    {typeof activeWeather.wind_speed_kph === 'number'
+                      ? `${activeWeather.wind_speed_kph.toLocaleString(language === 'en' ? 'en-US' : 'id-ID')} ${language === 'en' ? 'km/h' : 'km/j'}`
+                      : '—'}
+                  </span>
+                </div>
+              </div>
+
+              <div className={`flex items-center gap-2.5 px-3 py-2.5 border ${isDark ? 'bg-white/[0.02] border-white/5' : 'bg-slate-50 border-slate-100'} rounded-xl`}>
+                <div className="text-indigo-400 p-1.5 bg-indigo-500/10 rounded-lg shrink-0">
+                  <Compass className="w-3.5 h-3.5" />
+                </div>
+                <div className="flex flex-col text-[10px] leading-tight min-w-0">
+                  <span className={themeTextMuted}>{language === 'en' ? 'Wind Direction' : 'Arah Angin'}</span>
+                  <span className={`font-bold mt-0.5 truncate ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                    {activeWeather.wind_direction || '—'}
+                  </span>
+                </div>
+              </div>
+
+              <div className={`flex items-center gap-2.5 px-3 py-2.5 border ${isDark ? 'bg-white/[0.02] border-white/5' : 'bg-slate-50 border-slate-100'} rounded-xl`}>
+                <div className="text-emerald-500 p-1.5 bg-emerald-500/10 rounded-lg shrink-0">
+                  <Eye className="w-3.5 h-3.5" />
+                </div>
+                <div className="flex flex-col text-[10px] leading-tight min-w-0">
+                  <span className={themeTextMuted}>{language === 'en' ? 'Visibility' : 'Jarak Pandang'}</span>
+                  <span className={`font-bold mt-0.5 tabular-nums ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                    {activeWeather.visibility_km || '—'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Right Zone: Upcoming 3-Hourly Forecast Slots */}
+            <div className={`md:col-span-2 lg:col-span-4 flex flex-col gap-2 p-3.5 rounded-xl border ${isDark ? 'bg-white/[0.02] border-white/5' : 'bg-slate-50/80 border-slate-200/80'}`}>
+              <div className="flex items-center justify-between gap-2">
+                <span className={`text-[9px] font-bold uppercase tracking-[0.18em] font-mono ${isSensorSimWeather ? 'text-amber-400/90' : themeTextMuted}`}>
+                  {isSensorSimWeather
+                    ? (language === 'en' ? 'Simulated Outlook (WIB)' : 'Proyeksi Cuaca Simulasi (WIB)')
+                    : activeWeather.source === 'Open-Meteo'
+                      ? (language === 'en' ? 'Upcoming 3-Hourly Forecast (WIB)' : 'Prakiraan 3-Jaman Berikutnya (WIB)')
+                      : (language === 'en' ? 'Upcoming BMKG Forecast (WIB)' : 'Prakiraan BMKG Berikutnya (WIB)')}
+                </span>
+                <span className={`text-[9px] font-mono tabular-nums ${themeTextMuted}`}>
+                  {activeWeather.valid_at || '—'}
+                </span>
+              </div>
+
+              {Array.isArray(activeWeather.forecast_slots) && activeWeather.forecast_slots.length > 0 ? (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {activeWeather.forecast_slots.map((slot, idx) => (
+                    <div
+                      key={`${slot.date_label}-${slot.time_wib}-${idx}`}
+                      title={`${slot.date_label} ${slot.time_wib} WIB · ${slot.condition} · ${slot.wind_speed_kph ?? '—'} ${language === 'en' ? 'km/h' : 'km/j'} (${slot.wind_direction})`}
+                      className={`flex flex-col items-center justify-between py-2 px-1.5 rounded-lg border text-center ${
+                        isDark ? 'bg-white/[0.03] border-white/5' : 'bg-white border-slate-200/70'
+                      }`}
+                    >
+                      <span className={`text-[9.5px] font-mono font-bold tabular-nums ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+                        {slot.time_wib}
+                      </span>
+                      {slot.weather_icon ? (
+                        <img
+                          src={slot.weather_icon}
+                          alt={slot.condition}
+                          className="w-7 h-7 my-1 object-contain"
+                          referrerPolicy="no-referrer"
+                        />
+                      ) : (
+                        <CloudRain className="w-5 h-5 my-1.5 text-sky-400" />
+                      )}
+                      <span className={`text-xs font-bold tabular-nums ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                        {slot.temperature_c}°
+                      </span>
+                      <span className={`text-[9px] font-mono tabular-nums ${themeTextMuted}`}>
+                        {typeof slot.humidity_percent === 'number' ? `${slot.humidity_percent}%` : '—'}
+                      </span>
+                      {typeof slot.precipitation_mm === 'number' && slot.precipitation_mm > 0 ? (
+                        <span className="text-[8.5px] font-mono font-semibold text-sky-400 tabular-nums mt-0.5">
+                          {slot.precipitation_mm.toLocaleString(language === 'en' ? 'en-US' : 'id-ID')} mm
+                        </span>
+                      ) : (
+                        <span className={`text-[8px] truncate max-w-full mt-0.5 ${themeTextMuted}`}>
+                          {slot.condition}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className={`text-[10px] font-mono py-3 text-center ${themeTextMuted}`}>
+                  {language === 'en'
+                    ? '3-hourly BMKG forecast slots unavailable in fallback mode.'
+                    : 'Slot prakiraan 3-jaman BMKG tidak tersedia pada mode fallback.'}
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center gap-2 py-6 text-center">
+            <span className={`text-[10px] font-mono ${themeTextMuted}`}>
+              {weatherError || (language === 'en'
+                ? 'Official BMKG weather data is currently unavailable.'
+                : 'Data prakiraan cuaca resmi BMKG sedang tidak tersedia.')}
+            </span>
+            <button
+              onClick={() => fetchLiveWeather(language, false, true)}
+              className={`px-3 py-1.5 rounded-lg text-[10px] font-mono font-semibold border transition-colors cursor-pointer ${
+                isDark
+                  ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-200'
+                  : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-800'
+              }`}
+            >
+              {language === 'en' ? 'Retry BMKG Sync' : 'Coba Muat Ulang BMKG'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* HYDROLOGICAL FUSION SUMMARY (SENSOR ESP32 × CUACA BMKG) */}
+      <div
+        id="hydrology-weather-fusion"
+        className={`w-full min-w-0 ${themeCard} rounded-2xl p-4 sm:p-5 lg:p-6`}
+      >
+        <div className={`flex flex-wrap items-center justify-between gap-2 pb-3.5 mb-4 border-b ${themeBorder}`}>
+          <div className="flex flex-col">
+            <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${themeTextMuted} font-mono`}>
+              {language === 'en'
+                ? 'Hydrological Fusion · ESP32 Sensor × Kukusan Weather'
+                : 'Korelasi Hidrologi · Sensor ESP32 × Cuaca Kukusan'}
+            </span>
+            <span className={`text-[11px] font-sans mt-0.5 ${themeTextSub}`}>
+              {language === 'en'
+                ? 'Cross-reference between ultrasonic water elevation, local precipitation, and 6-hour LSTM projection.'
+                : 'Ringkasan keterkaitan elevasi ultrasonik lapangan, curah hujan lokal, dan proyeksi LSTM 6 jam.'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 sm:flex items-center gap-2 w-full sm:w-auto">
+            <button
+              type="button"
+              onClick={() => setDashboardSubTab('map')}
+              className={`px-3 py-1.5 rounded-lg border text-[10px] font-mono font-bold transition-colors cursor-pointer text-center ${
+                isDark
+                  ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300'
+                  : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-700'
+              }`}
+            >
+              {language === 'en' ? 'Open Map & Gauge' : 'Lihat Peta & Elevasi'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setDashboardSubTab('chart')}
+              className="px-3 py-1.5 rounded-lg bg-[#3B82F6]/15 hover:bg-[#3B82F6]/25 border border-[#3B82F6]/30 text-[10px] font-mono font-bold text-[#3B82F6] transition-colors cursor-pointer text-center"
+            >
+              {language === 'en' ? 'Open LSTM Chart' : 'Lihat Grafik LSTM'}
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* Col 1: Ultrasonic Water Elevation vs Threshold */}
+          <div className={`rounded-xl border p-4 flex flex-col justify-between gap-3 ${isDark ? 'bg-white/[0.02] border-white/5' : 'bg-slate-50/80 border-slate-200/80'}`}>
+            <div className="flex items-center justify-between gap-2">
+              <span className={`text-[10px] font-mono uppercase tracking-wider ${themeTextMuted}`}>
+                {language === 'en' ? 'ESP32 Elevation' : 'Elevasi ESP32'}
+              </span>
+              <span className={`text-[10px] font-mono font-bold uppercase ${alertStatus === 'Bahaya' ? 'text-rose-400' : alertStatus === 'Siaga' ? 'text-amber-400' : alertStatus === 'Offline' ? 'text-slate-400' : 'text-emerald-400'}`}>
+                {localizedAlertStatus}
+              </span>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className={`text-3xl font-sans font-light tabular-nums ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                {isDeviceOffline ? '--' : currentLevel.toFixed(1)}
+                <span className="text-xs text-slate-400 ml-1">cm</span>
+              </span>
+              <span className={`text-[10px] font-mono tabular-nums ${themeTextMuted}`}>
+                d = {isDeviceOffline ? '--' : Math.max(0, (config?.reference_height || 300) - currentLevel).toFixed(0)} cm
+              </span>
+            </div>
+            <div className="space-y-1.5">
+              <div className={`w-full h-2 rounded-full overflow-hidden ${isDark ? 'bg-white/10' : 'bg-slate-200'}`}>
+                <div
+                  className={`h-full rounded-full transition-all duration-700 ${
+                    alertStatus === 'Bahaya' ? 'bg-rose-500' : alertStatus === 'Siaga' ? 'bg-amber-400' : 'bg-[#3B82F6]'
+                  }`}
+                  style={{ width: `${Math.min(100, Math.max(4, (currentLevel / Math.max(thresholdBahaya, 100)) * 100))}%` }}
+                />
+              </div>
+              <div className={`flex justify-between text-[9.5px] font-mono tabular-nums ${themeTextMuted}`}>
+                <span>0 cm</span>
+                <span className="text-amber-500">{language === 'en' ? 'Alert' : 'Siaga'} {thresholdSiaga} cm</span>
+                <span className="text-rose-500">{language === 'en' ? 'Danger' : 'Bahaya'} {thresholdBahaya} cm</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Col 2: Atmospheric Rain & Moisture Context */}
+          <div className={`rounded-xl border p-4 flex flex-col justify-between gap-3 ${isDark ? 'bg-white/[0.02] border-white/5' : 'bg-slate-50/80 border-slate-200/80'}`}>
+            <div className="flex items-center justify-between gap-2">
+              <span className={`text-[10px] font-mono uppercase tracking-wider ${themeTextMuted}`}>
+                {language === 'en' ? 'Rainfall Context' : 'Konteks Curah Hujan'}
+              </span>
+              <span className={`text-[10px] font-mono font-bold uppercase ${isSensorSimWeather ? 'text-amber-400' : 'text-sky-400'}`}>
+                {isSensorSimWeather ? (language === 'en' ? 'SENSOR SYNC' : 'SINKRON SENSOR') : 'BMKG LIVE'}
+              </span>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className={`text-2xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                {activeWeather?.precipitation_mm ?? '—'}
+              </span>
+              <span className={`text-[11px] font-medium truncate ${themeTextSub}`}>
+                {activeWeather?.condition || '—'}
+              </span>
+            </div>
+            <div className={`grid grid-cols-2 gap-2 pt-2 border-t ${themeBorder} text-[10px] font-mono tabular-nums`}>
+              <div>
+                <span className={`block ${themeTextMuted}`}>{language === 'en' ? 'Humidity' : 'Kelembapan'}</span>
+                <span className={`font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                  {typeof activeWeather?.humidity_percent === 'number' ? `${activeWeather.humidity_percent}%` : '—'}
+                </span>
+              </div>
+              <div>
+                <span className={`block ${themeTextMuted}`}>{language === 'en' ? 'Cloud Cover' : 'Tutupan Awan'}</span>
+                <span className={`font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                  {typeof activeWeather?.cloud_cover_percent === 'number' ? `${activeWeather.cloud_cover_percent}%` : '—'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Col 3: 6-Hour LSTM Outlook */}
+          <div className={`rounded-xl border p-4 flex flex-col justify-between gap-3 ${isDark ? 'bg-white/[0.02] border-white/5' : 'bg-slate-50/80 border-slate-200/80'}`}>
+            <div className="flex items-center justify-between gap-2">
+              <span className={`text-[10px] font-mono uppercase tracking-wider ${themeTextMuted}`}>
+                {language === 'en' ? 'LSTM 6h Outlook' : 'Proyeksi LSTM 6 Jam'}
+              </span>
+              <span
+                className={`text-[10px] font-mono font-bold uppercase ${
+                  lstmForecast?.status === 'Bahaya'
+                    ? 'text-rose-400'
+                    : lstmForecast?.status === 'Siaga'
+                      ? 'text-amber-400'
+                      : 'text-emerald-400'
+                }`}
+              >
+                {localizedLstmStatus}
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-center">
+              {[
+                { label: language === 'en' ? 'T+1h' : 'T+1j', val: lstmForecast?.prediction_1h },
+                { label: language === 'en' ? 'T+3h' : 'T+3j', val: lstmForecast?.prediction_3h },
+                { label: language === 'en' ? 'T+6h' : 'T+6j', val: lstmForecast?.prediction_6h },
+              ].map((item) => (
+                <div key={item.label} className={`rounded-lg py-1.5 px-1 border ${isDark ? 'bg-black/30 border-white/5' : 'bg-white border-slate-200/80'}`}>
+                  <span className={`block text-[9px] font-mono ${themeTextMuted}`}>{item.label}</span>
+                  <span className={`block text-sm font-bold tabular-nums mt-0.5 ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    {typeof item.val === 'number' ? item.val.toFixed(1) : '--'}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className={`text-[10px] font-mono ${themeTextMuted} pt-2 border-t ${themeBorder} truncate`}>
+              {lstmForecast
+                ? `${lstmForecast.modelMeta.sourceFile} · MAE ${lstmForecast.modelMeta.maeCm} cm`
+                : 'model_lstm_banjir.h5 · Standby'}
+            </div>
+          </div>
+        </div>
+      </div>
+      </div>
+      )}
+
+      {/* SUB-TAB 2: UNIFIED SCADA TELEMETRY CURVE + TRAINED LSTM FORECAST (SINGLE SOURCE OF TRUTH) */}
+      {dashboardSubTab === 'chart' && (
+      <div id="scada-charts-forecasts" className="col-span-12 min-w-0">
+        <div id="scada-plot-container" className={`${themeCard} rounded-2xl p-4 sm:p-5 lg:p-6 flex flex-col gap-5 sm:gap-6 overflow-hidden`}>
+
+          {/* Chart Header & Controls */}
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-wrap justify-between items-center gap-2">
+              <div>
+                <span className={`text-[10px] font-bold uppercase tracking-[0.22em] ${themeTextMuted} font-mono`}>
+                  {language === 'en'
+                    ? 'Unified SCADA Telemetry & LSTM Forecast Curve'
+                    : 'Kurva Elevasi Air SCADA & Prediksi LSTM Terpadu'}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-3.5 flex-wrap">
+                {chartViewMode === 'elevation' ? (
+                  <>
+                    <span className={`text-[10px] ${themeTextMuted} flex items-center gap-1.5 font-mono uppercase tracking-wider`}>
+                      <span className="w-2.5 h-0.5 bg-[#3B82F6] inline-block" /> {language === 'en' ? 'Actual (h)' : 'Aktual (h)'}
+                    </span>
+                    <span className={`text-[10px] ${themeTextMuted} flex items-center gap-1.5 font-mono uppercase tracking-wider`}>
+                      <span className="w-3 h-0.5 border-t-2 border-dashed border-violet-400 inline-block" /> {language === 'en' ? 'LSTM Forecast' : 'Prediksi LSTM'}
+                    </span>
+                    <span className={`text-[10px] ${themeTextMuted} flex items-center gap-1.5 font-mono uppercase tracking-wider`}>
+                      <span className="w-2.5 h-0.5 border-t border-dashed border-amber-500 inline-block" /> {language === 'en' ? 'Alert' : 'Siaga'}
+                    </span>
+                    <span className={`text-[10px] ${themeTextMuted} flex items-center gap-1.5 font-mono uppercase tracking-wider`}>
+                      <span className="w-2.5 h-0.5 border-t border-dashed border-rose-500 inline-block" /> {language === 'en' ? 'Danger' : 'Bahaya'}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-[10px] text-emerald-400 flex items-center gap-1.5 font-mono uppercase tracking-wider">
+                      <span className="w-2.5 h-0.5 bg-emerald-500 inline-block" /> {language === 'en' ? 'Sensor Distance (d)' : 'Jarak Sensor (cm)'}
+                    </span>
+                    <span className={`text-[10px] ${themeTextMuted} flex items-center gap-1.5 font-mono uppercase tracking-wider`}>
+                      <span className="w-2.5 h-0.5 border-t border-dashed border-zinc-500 inline-block" /> H_REF: {config?.reference_height || 300} cm
+                    </span>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 flex-wrap">
+              <div className="flex items-center gap-2 flex-wrap">
+                {/* Mode Toggle: Elevasi vs Raw Ultrasonik */}
+                <div className={`grid grid-cols-2 sm:inline-flex items-center gap-1 w-full sm:w-auto border ${isDark ? 'border-white/10 bg-black/30' : 'border-slate-200 bg-slate-100'} rounded-lg p-0.5 text-[10px] font-mono`}>
+                  <button
+                    id="btn-mode-elevation"
+                    onClick={() => setChartViewMode('elevation')}
+                    className={`px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-md transition-all cursor-pointer text-center whitespace-nowrap shrink-0 ${
+                      chartViewMode === 'elevation'
+                        ? 'bg-[#3B82F6] text-black font-bold'
+                        : `${themeTextSub} hover:text-[#3B82F6]`
+                    }`}
+                    title={language === 'en' ? 'Show Water Surface Elevation (TMA) + LSTM forecast' : 'Tampilkan Elevasi Muka Air (TMA) + kurva prediksi LSTM'}
+                  >
+                    {language === 'en' ? 'Elevation + LSTM' : 'Elevasi + LSTM'}
+                  </button>
+                  <button
+                    id="btn-mode-raw"
+                    onClick={() => setChartViewMode('raw_ultrasonic')}
+                    className={`px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-md transition-all cursor-pointer text-center whitespace-nowrap shrink-0 ${
+                      chartViewMode === 'raw_ultrasonic'
+                        ? 'bg-emerald-500 text-black font-bold'
+                        : `${themeTextSub} hover:text-emerald-400`
+                    }`}
+                    title={language === 'en' ? 'Show raw JSN-SR04T reflection distance in cm' : 'Tampilkan data mentah jarak pantul sensor ultrasonik JSN-SR04T (cm)'}
+                  >
+                    {language === 'en' ? 'Raw Ultrasonic (d)' : 'Raw Ultrasonik (d)'}
+                  </button>
+                </div>
+
+                {/* Range Toggle */}
+                <div className={`grid grid-cols-3 sm:inline-flex items-center gap-1 w-full sm:w-auto border ${isDark ? 'border-white/10 bg-black/30' : 'border-slate-200 bg-slate-100'} rounded-lg p-0.5 text-[10px] font-mono`}>
+                  <button
+                    id="btn-range-realtime"
+                    onClick={() => {
+                      setUseBatch360Mode(false);
+                      setChartRange('realtime');
+                    }}
+                    className={`px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-md transition-all cursor-pointer text-center whitespace-nowrap shrink-0 ${(!useBatch360Mode && chartRange === 'realtime') ? 'bg-[#3B82F6] text-black font-bold' : `${themeTextSub} hover:text-[#3B82F6]`}`}
+                    title={language === 'en' ? 'High resolution chart showing last 20 telemetry readings' : 'Grafik resolusi tinggi menampilkan 20 pembacaan telemetri terakhir'}
+                  >
+                    {language === 'en' ? '20 Pts' : '20 Poin'}
+                  </button>
+                  <button
+                    id="btn-range-24h"
+                    onClick={() => {
+                      setUseBatch360Mode(false);
+                      setChartRange('24h');
+                    }}
+                    className={`px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-md transition-all cursor-pointer text-center whitespace-nowrap shrink-0 ${(!useBatch360Mode && chartRange === '24h') ? 'bg-[#3B82F6] text-black font-bold' : `${themeTextSub} hover:text-[#3B82F6]`}`}
+                    title={language === 'en' ? 'Cumulative 24-hour water elevation trend' : 'Grafik histori elevasi air akumulatif dari 24 jam terakhir'}
+                  >
+                    {language === 'en' ? '24h Trend' : 'Tren 24J'}
+                  </button>
+                  <button
+                    id="btn-range-batch360"
+                    onClick={() => setUseBatch360Mode(!useBatch360Mode)}
+                    className={`px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-md transition-all cursor-pointer text-center whitespace-nowrap shrink-0 ${useBatch360Mode ? 'bg-emerald-500 text-black font-bold' : `${themeTextSub} hover:text-emerald-400`}`}
+                    title={language === 'en' ? 'Visualize 360 continuous sample array in 1 ESP32 batch' : 'Tampilkan visualisasi 360 array sampel kontinu dalam 1 siklus batch ESP32'}
+                  >
+                    {language === 'en' ? 'Batch 360' : 'Batch 360'}
+                  </button>
+                </div>
               </div>
 
               {/* Export Data Button */}
-              <div className="relative">
+              <div className="relative w-full sm:w-auto">
                 <button
                   id="btn-export-csv"
                   onClick={handleExportCSV}
                   disabled={isExportingCSV}
                   title={language === 'en' ? 'Export last 24 hours sensor logs to CSV' : 'Ekspor Log Sensor 24 Jam Terakhir ke format CSV'}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 border text-[10px] font-mono rounded-lg transition-all cursor-pointer ${
-                    isDark 
-                      ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300' 
+                  className={`w-full sm:w-auto flex items-center justify-center gap-1.5 px-3 py-2 sm:py-1.5 border text-[10px] font-mono rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                    isDark
+                      ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300'
                       : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-600 shadow-sm'
                   } ${isExportingCSV ? 'opacity-50 cursor-wait' : ''}`}
                 >
@@ -1606,14 +2135,14 @@ export default function SCADADashboard({
                     <Download className="w-3.5 h-3.5 text-[#3B82F6]" />
                   )}
                   <span className="font-bold">
-                    {isExportingCSV 
-                      ? (language === 'en' ? 'QUERYING 24H...' : 'MENGAMBIL 24 JAM...') 
-                      : (language === 'en' ? 'EXPORT CSV' : 'EXPORT DATA')}
+                    {isExportingCSV
+                      ? (language === 'en' ? 'QUERYING 24H...' : 'MENGAMBIL 24 JAM...')
+                      : (language === 'en' ? 'EXPORT CSV' : 'EKSPOR CSV')}
                   </span>
                 </button>
 
                 {exportNotice && (
-                  <div className="absolute right-0 top-full mt-2 w-72 p-2.5 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg text-[10px] font-sans shadow-xl z-50 animate-in fade-in slide-in-from-top-1">
+                  <div className="absolute right-0 top-full mt-2 w-full sm:w-72 p-2.5 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg text-[10px] font-sans shadow-xl z-50">
                     <div className="flex items-start gap-1.5">
                       <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                       <span>{exportNotice}</span>
@@ -1622,34 +2151,10 @@ export default function SCADADashboard({
                 )}
               </div>
             </div>
-
-            <div className="flex items-center gap-3">
-              {chartViewMode === 'elevation' ? (
-                <>
-                  <span className={`text-[9px] ${themeTextMuted} flex items-center gap-1 font-mono uppercase tracking-wider`}>
-                    <span className="w-2 h-2 rounded-full bg-[#3B82F6] inline-block" /> {language === 'en' ? 'Elevation (h)' : 'Elevasi Air (h)'}
-                  </span>
-                  <span className={`text-[9px] ${themeTextMuted} flex items-center gap-1 font-mono uppercase tracking-wider`}>
-                    <span className="w-2.5 h-0.5 bg-amber-500/80 inline-block border-t border-dashed" /> {language === 'en' ? 'Alert Limit' : 'Batas Siaga'}
-                  </span>
-                  <span className={`text-[9px] ${themeTextMuted} flex items-center gap-1 font-mono uppercase tracking-wider`}>
-                    <span className="w-2.5 h-0.5 bg-rose-500/80 inline-block border-t border-dashed" /> {language === 'en' ? 'Danger Limit' : 'Batas Bahaya'}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span className={`text-[9px] text-emerald-400 flex items-center gap-1 font-mono uppercase tracking-wider`}>
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block animate-pulse" /> {language === 'en' ? 'Sensor Distance (d)' : 'Jarak Sensor ke Air (cm)'}
-                  </span>
-                  <span className={`text-[9px] ${themeTextMuted} flex items-center gap-1 font-mono uppercase tracking-wider`}>
-                    <span className="w-2.5 h-0.5 bg-zinc-500 inline-block border-t border-dashed" /> H_REF: {config?.reference_height || 300}cm
-                  </span>
-                </>
-              )}
-            </div>
           </div>
 
-          <div className="w-full h-72">
+          {/* Unified Plot Area */}
+          <div className="w-full h-[310px]">
             {!hasReceivedReadingsSnapshot ? (
               <div className={`w-full h-full flex flex-col items-center justify-center ${themeTextMuted} font-mono text-[10px] uppercase tracking-widest`}>
                 <RefreshCw className="w-5 h-5 animate-spin text-[#3B82F6] mb-3" />
@@ -1657,26 +2162,23 @@ export default function SCADADashboard({
               </div>
             ) : chartData.length === 0 ? (
               <div className={`w-full h-full flex flex-col items-center justify-center p-6 text-center rounded-xl border border-dashed ${isDark ? 'bg-black/30 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
-                <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 mb-3 shadow-sm">
-                  <Activity className="w-6 h-6 animate-pulse" />
+                <div className="w-11 h-11 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 mb-3">
+                  <Activity className="w-5 h-5" />
                 </div>
-                <div className="flex items-center gap-2 mb-1.5">
-                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping inline-block" />
-                  <span className="font-mono text-xs font-bold uppercase tracking-wider text-amber-400">
-                    {language === 'en' ? 'TELEMETRY STANDBY — AWAITING ESP32' : 'STATUS TELEMETRI: STANDBY (MENUNGGU TRANSMISI ESP32)'}
-                  </span>
-                </div>
+                <span className="font-mono text-xs font-bold uppercase tracking-wider text-amber-400 mb-1.5">
+                  {language === 'en' ? 'Telemetry Standby — Awaiting ESP32' : 'Status Telemetri: Standby (Menunggu Transmisi ESP32)'}
+                </span>
                 <p className={`text-xs max-w-lg mb-4 font-sans leading-relaxed ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                   {language === 'en'
-                    ? 'Database is active and ready. Currently no telemetry packets in sensor database (device in standby or simulation was recently reset). The curve will automatically plot once ESP32 transmits data.'
-                    : 'Database aktif dan siap menerima data. Saat ini belum ada data sensor yang masuk dari ESP32 (perangkat standby/offline atau simulasi baru saja direset). Grafik akan langsung tergambar otomatis saat ESP32 mengirim data.'}
+                    ? 'Database is active and ready. The unified curve and LSTM horizons will plot automatically once ESP32 transmits data.'
+                    : 'Database aktif dan siap menerima data. Kurva telemetri dan proyeksi LSTM akan tergambar otomatis saat ESP32 mengirim data.'}
                 </p>
                 <div className="flex flex-wrap items-center justify-center gap-3">
                   <button
                     type="button"
                     onClick={handleInjectQuickTest}
                     disabled={isInjectingTestTelemetry}
-                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-[#3B82F6] hover:bg-blue-400 text-black transition-all shadow-md cursor-pointer disabled:opacity-50"
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-[#3B82F6] hover:bg-blue-400 text-black transition-all cursor-pointer disabled:opacity-50"
                   >
                     {isInjectingTestTelemetry ? (
                       <RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -1690,8 +2192,8 @@ export default function SCADADashboard({
                       type="button"
                       onClick={() => onNavigateTab('admin')}
                       className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium border transition-all cursor-pointer ${
-                        isDark 
-                          ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300' 
+                        isDark
+                          ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300'
                           : 'bg-white hover:bg-slate-100 border-slate-200 text-slate-700 shadow-sm'
                       }`}
                     >
@@ -1702,453 +2204,258 @@ export default function SCADADashboard({
                 </div>
               </div>
             ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+              <ResponsiveContainer width="100%" height="100%" debounce={50}>
+                <AreaChart data={unifiedChartData} margin={{ top: 10, right: 18, left: -16, bottom: 0 }}>
                   <defs>
                     <linearGradient id="colorLevel" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.15}/>
-                      <stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/>
+                      <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.18} />
+                      <stop offset="95%" stopColor="#3B82F6" stopOpacity={0} />
+                    </linearGradient>
+                    <linearGradient id="colorPrediksi" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#A78BFA" stopOpacity={0.22} />
+                      <stop offset="95%" stopColor="#A78BFA" stopOpacity={0} />
                     </linearGradient>
                     <linearGradient id="colorRaw" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#10B981" stopOpacity={0.2}/>
-                      <stop offset="95%" stopColor="#10B981" stopOpacity={0}/>
+                      <stop offset="5%" stopColor="#10B981" stopOpacity={0.2} />
+                      <stop offset="95%" stopColor="#10B981" stopOpacity={0} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke={themeGridColor} />
-                  <XAxis dataKey="time" stroke="#52525B" style={{ fontSize: 9, fontFamily: 'monospace' }} />
-                  <YAxis 
-                    domain={chartViewMode === 'elevation' ? [0, 160] : [0, Math.max(300, (config?.reference_height || 300) + 20)]} 
-                    stroke="#52525B" 
-                    style={{ fontSize: 9, fontFamily: 'monospace' }} 
+                  <XAxis dataKey="time" stroke="#52525B" style={{ fontSize: 10, fontFamily: 'monospace' }} />
+                  <YAxis
+                    domain={
+                      chartViewMode === 'elevation'
+                        ? [0, elevationAxisMax]
+                        : [0, Math.max(300, (config?.reference_height || 300) + 20)]
+                    }
+                    stroke="#52525B"
+                    style={{ fontSize: 10, fontFamily: 'monospace' }}
                   />
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: isDark ? '#0D0D0F' : '#ffffff', borderColor: isDark ? 'rgba(255,255,255,0.08)' : '#e2e8f0', borderRadius: '8px' }}
-                    labelStyle={{ color: isDark ? '#94a3b8' : '#475569', fontWeight: 'bold', fontSize: 10, fontFamily: 'monospace' }}
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: isDark ? '#0D0D0F' : '#ffffff',
+                      borderColor: isDark ? 'rgba(255,255,255,0.08)' : '#e2e8f0',
+                      borderRadius: '8px',
+                    }}
+                    labelStyle={{
+                      color: isDark ? '#94a3b8' : '#475569',
+                      fontWeight: 'bold',
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                    }}
                     itemStyle={{ color: isDark ? '#fff' : '#0f172a', fontSize: 11 }}
                   />
                   {chartViewMode === 'elevation' ? (
                     <>
-                      <Area type="monotone" dataKey="elevasi" name={language === 'en' ? "Water Level (cm)" : "Elevasi Air (cm)"} stroke="#3B82F6" strokeWidth={1.5} fillOpacity={1} fill="url(#colorLevel)" />
-                      <ReferenceLine y={thresholdSiaga} stroke="#f59e0b" strokeDasharray="4 4" strokeWidth={1.2} label={{ value: language === 'en' ? 'ALERT' : 'SIAGA', fill: '#f59e0b', fontSize: 8, position: 'right', fontFamily: 'monospace' }} />
-                      <ReferenceLine y={thresholdBahaya} stroke="#f43f5e" strokeDasharray="4 4" strokeWidth={1.2} label={{ value: language === 'en' ? 'DANGER' : 'BAHAYA', fill: '#f43f5e', fontSize: 8, position: 'right', fontFamily: 'monospace' }} />
+                      <Area
+                        type="monotone"
+                        dataKey="elevasi"
+                        name={language === 'en' ? 'Actual Elevation (cm)' : 'Elevasi Aktual (cm)'}
+                        stroke="#3B82F6"
+                        strokeWidth={2}
+                        fillOpacity={1}
+                        fill="url(#colorLevel)"
+                        connectNulls={false}
+                      />
+                      {activeForecast && (
+                        <Area
+                          type="monotone"
+                          dataKey="prediksi"
+                          name={language === 'en' ? 'LSTM Forecast (cm)' : 'Prediksi LSTM (cm)'}
+                          stroke="#A78BFA"
+                          strokeWidth={2}
+                          strokeDasharray="5 4"
+                          fillOpacity={1}
+                          fill="url(#colorPrediksi)"
+                          connectNulls={false}
+                        />
+                      )}
+                      {activeForecast && lastHistoricalTimeLabel && (
+                        <ReferenceLine
+                          x={lastHistoricalTimeLabel}
+                          stroke={isDark ? 'rgba(167,139,250,0.4)' : 'rgba(124,58,237,0.35)'}
+                          strokeDasharray="3 3"
+                          label={{
+                            value: language === 'en' ? 'NOW' : 'SAAT INI',
+                            fill: '#A78BFA',
+                            fontSize: 9,
+                            position: 'insideTopRight',
+                            fontFamily: 'monospace',
+                          }}
+                        />
+                      )}
+                      <ReferenceLine
+                        y={thresholdSiaga}
+                        stroke="#f59e0b"
+                        strokeDasharray="4 4"
+                        strokeWidth={1.2}
+                        label={{
+                          value: language === 'en' ? 'ALERT' : 'SIAGA',
+                          fill: '#f59e0b',
+                          fontSize: 8,
+                          position: 'right',
+                          fontFamily: 'monospace',
+                        }}
+                      />
+                      <ReferenceLine
+                        y={thresholdBahaya}
+                        stroke="#f43f5e"
+                        strokeDasharray="4 4"
+                        strokeWidth={1.2}
+                        label={{
+                          value: language === 'en' ? 'DANGER' : 'BAHAYA',
+                          fill: '#f43f5e',
+                          fontSize: 8,
+                          position: 'right',
+                          fontFamily: 'monospace',
+                        }}
+                      />
                     </>
                   ) : (
                     <>
-                      <Area type="monotone" dataKey="raw_distance" name={language === 'en' ? "Raw Sensor Gap (cm)" : "Raw Jarak Ultrasonik (cm)"} stroke="#10B981" strokeWidth={1.5} fillOpacity={1} fill="url(#colorRaw)" />
-                      <ReferenceLine y={config?.reference_height || 300} stroke="#71717A" strokeDasharray="3 3" strokeWidth={1} label={{ value: 'TIANG/REF', fill: '#71717A', fontSize: 8, position: 'right', fontFamily: 'monospace' }} />
+                      <Area
+                        type="monotone"
+                        dataKey="raw_distance"
+                        name={language === 'en' ? 'Raw Sensor Gap (cm)' : 'Raw Jarak Ultrasonik (cm)'}
+                        stroke="#10B981"
+                        strokeWidth={1.8}
+                        fillOpacity={1}
+                        fill="url(#colorRaw)"
+                      />
+                      <ReferenceLine
+                        y={config?.reference_height || 300}
+                        stroke="#71717A"
+                        strokeDasharray="3 3"
+                        strokeWidth={1}
+                        label={{
+                          value: language === 'en' ? 'POLE/REF' : 'TIANG/REF',
+                          fill: '#71717A',
+                          fontSize: 8,
+                          position: 'right',
+                          fontFamily: 'monospace',
+                        }}
+                      />
                     </>
                   )}
                 </AreaChart>
               </ResponsiveContainer>
             )}
           </div>
-        </div>
 
-        {/* Processed LSTM Prognostic Forecast Horizons */}
-        <div id="processed-forecast-panel" className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          
-          <div className={`${themeCard} rounded-2xl p-5 flex flex-col justify-between`}>
-            <div className={`flex justify-between items-center ${themeTextMuted} font-mono text-[9px] uppercase tracking-widest`}>
-              <span>Horizon T+30m</span>
-              <Clock className={`w-3.5 h-3.5 ${themeTextMuted}`} />
-            </div>
-            <div className="my-3">
-              <span className={`text-3xl font-sans font-light tracking-tight ${isDark ? 'text-white' : 'text-slate-800'}`}>
-                {latestPrediction ? `${latestPrediction.prediction_30m}` : '--'} <span className="text-xs font-normal text-slate-400">cm</span>
-              </span>
-            </div>
-            <div className="text-[10px] font-mono text-[#3B82F6] bg-[#3B82F6]/5 border border-[#3B82F6]/15 rounded py-1 text-center">
-              CONF: {latestPrediction ? `${latestPrediction.confidence_score}%` : '--%'}
-            </div>
-          </div>
-
-          <div className={`${themeCard} rounded-2xl p-5 flex flex-col justify-between`}>
-            <div className={`flex justify-between items-center ${themeTextMuted} font-mono text-[9px] uppercase tracking-widest`}>
-              <span>{language === 'en' ? 'Horizon T+1 Hour' : 'Horizon T+1 Jam'}</span>
-              <Clock className="w-3.5 h-3.5 text-[#3B82F6]" />
-            </div>
-            <div className="my-3">
-              <span className={`text-3xl font-sans font-light tracking-tight ${isDark ? 'text-white' : 'text-slate-800'}`}>
-                {latestPrediction ? `${latestPrediction.prediction_1h}` : '--'} <span className="text-xs font-normal text-slate-400">cm</span>
-              </span>
-            </div>
-            <div className="text-[10px] font-mono text-[#3B82F6] bg-[#3B82F6]/5 border border-[#3B82F6]/15 rounded py-1 text-center">
-              CONF: {latestPrediction ? `${Math.round(latestPrediction.confidence_score * 0.95)}%` : '--%'}
-            </div>
-          </div>
-
-          <div className={`${themeCard} rounded-2xl p-5 flex flex-col justify-between`}>
-            <div className={`flex justify-between items-center ${themeTextMuted} font-mono text-[9px] uppercase tracking-widest`}>
-              <span>{language === 'en' ? 'Horizon T+3 Hours' : 'Horizon T+3 Jam'}</span>
-              <Clock className="w-3.5 h-3.5 text-purple-400" />
-            </div>
-            <div className="my-3">
-              <span className={`text-3xl font-sans font-light tracking-tight ${isDark ? 'text-white' : 'text-slate-800'}`}>
-                {latestPrediction ? `${latestPrediction.prediction_3h}` : '--'} <span className="text-xs font-normal text-slate-400">cm</span>
-              </span>
-            </div>
-            <div className="text-[10px] font-mono text-purple-400 bg-purple-950/15 border border-purple-800/20 rounded py-1 text-center">
-              CONF: {latestPrediction ? `${Math.round(latestPrediction.confidence_score * 0.88)}%` : '--%'}
-            </div>
-          </div>
-
-          <div className={`${themeCard} rounded-2xl p-5 flex flex-col justify-between`}>
-            <div className={`flex justify-between items-center ${themeTextMuted} font-mono text-[9px] uppercase tracking-widest`}>
-              <span>{language === 'en' ? 'Horizon T+6 Hours' : 'Horizon T+6 Jam'}</span>
-              <Clock className="w-3.5 h-3.5 text-amber-400" />
-            </div>
-            <div className="my-3">
-              <span className={`text-3xl font-sans font-light tracking-tight ${isDark ? 'text-white' : 'text-slate-800'}`}>
-                {latestPrediction ? `${latestPrediction.prediction_6h}` : '--'} <span className="text-xs font-normal text-slate-400">cm</span>
-              </span>
-            </div>
-            <div className="text-[10px] font-mono text-amber-400 bg-amber-950/15 border border-amber-800/20 rounded py-1 text-center">
-              CONF: {latestPrediction ? `${Math.round(latestPrediction.confidence_score * 0.78)}%` : '--%'}
-            </div>
-          </div>
-
-        </div>
-
-        {/* SENSOR TELEMETRI RANGKAIAN HARDWARE RTU // ESP32 WROOM 32D (Membentang Persegi Panjang Sejajar di Bawah 4 Horizon) */}
-        <div id="climate-gauge" className={`${themeCard} rounded-2xl p-6 border ${themeBorder} flex flex-col justify-between min-h-[310px]`}>
-          {/* Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3.5 border-b border-white/5">
-            <div className="flex items-center gap-2.5">
-              <div className={`p-2.5 ${isDark ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-emerald-50 border-emerald-200 text-emerald-600'} rounded-xl border`}>
-                <Cpu className="w-5 h-5" />
-              </div>
-              <div>
-                <span className={`text-[10px] font-bold uppercase tracking-[0.25em] ${themeTextMuted} font-mono block`}>
-                  {language === 'en' ? 'RTU Hardware Circuit & Telemetry' : 'Telemetri Rangkaian Hardware RTU'}
+          {/* Trained LSTM 4-Horizon Breakdown (Cohesive Footer Strip Inside Unified Analytics Card) */}
+          <div id="processed-forecast-panel" className={`pt-5 border-t ${themeBorder} flex flex-col gap-4`}>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-col">
+                <span className={`text-[10px] font-bold uppercase tracking-[0.22em] ${themeTextMuted} font-mono`}>
+                  {language === 'en' ? 'Trained LSTM Multi-Horizon Projections' : 'Proyeksi Multi-Horizon LSTM (Model Terlatih)'}
                 </span>
-                <span className="text-[10px] font-mono text-slate-400">
-                  {language === 'en' 
-                    ? 'ESP32 WROOM 32D Standalone • Native Wi-Fi • No Arduino • No SIM Module' 
-                    : 'ESP32 WROOM 32D Mandiri • Wi-Fi Terintegrasi • Tanpa Arduino • Tanpa Modul SIM'}
+                <span className="font-mono text-[10px] text-[#3B82F6] mt-0.5 tabular-nums">
+                  {lstmForecast
+                    ? `${lstmForecast.modelMeta.sourceFile} · ${lstmForecast.modelMeta.architecture} · ${lstmForecast.modelMeta.totalParams.toLocaleString(language === 'en' ? 'en-US' : 'id-ID')} params · MAE ${lstmForecast.modelMeta.maeCm} cm`
+                    : language === 'en'
+                      ? 'model_lstm_banjir.h5 · Awaiting sensor telemetry...'
+                      : 'model_lstm_banjir.h5 · Menunggu data telemetri sensor...'}
                 </span>
               </div>
-            </div>
-            
-            <div className="flex items-center gap-2 font-mono text-[9px]">
-              <button
-                type="button"
-                onClick={() => setShowWiringModal(true)}
-                className={`px-3 py-1.5 rounded-lg border flex items-center gap-1.5 font-bold transition-all cursor-pointer ${
-                  isDark
-                    ? 'bg-blue-500/10 hover:bg-blue-500/20 border-blue-500/30 text-blue-400'
-                    : 'bg-blue-50 hover:bg-blue-100 border-blue-200 text-blue-600'
-                }`}
-                title={language === 'en' ? 'View physical hardware wiring & pinout schematic' : 'Lihat skema diagram rangkaian & pinout hardware fisik'}
-              >
-                <Sliders className="w-3.5 h-3.5" />
-                <span>{language === 'en' ? 'Wiring Schematic' : 'Skema Rangkaian Proyek'}</span>
-              </button>
-              <span className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-lg flex items-center gap-1.5 font-bold">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                {language === 'en' ? 'Hardware Ready' : 'Rangkaian Siap'}
-              </span>
-            </div>
-          </div>
 
-          {/* 4 Identical, Symmetrical Sensor / Hardware Block Cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 flex-1 py-3.5">
-            {/* 1. Detektor Hujan Kapasitif (Capacitive Moisture Sensor V2.0) */}
-            <div className={`flex flex-col justify-between ${themeBgInner} rounded-xl p-4 border border-white/5 shadow-inner`}>
-              <div className="flex items-center justify-between">
-                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider font-semibold`}>
-                  {language === 'en' ? 'Raindrop Detection' : 'Deteksi Tetesan Hujan'}
-                </span>
-                <div className="p-1.5 rounded-lg bg-pink-500/10 text-pink-400 border border-pink-500/20">
-                  <CloudRain className="w-4 h-4" />
+              {lstmForecast && (
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] tabular-nums">
+                  <span className={themeTextMuted}>
+                    {language === 'en' ? 'Window' : 'Jendela'} {lstmForecast.inputCount}/24 · {lstmForecast.inferenceMs.toFixed(1)} ms
+                  </span>
+                  <span
+                    className={`font-bold uppercase tracking-wider ${
+                      lstmForecast.status === 'Bahaya'
+                        ? 'text-rose-400'
+                        : lstmForecast.status === 'Siaga'
+                          ? 'text-amber-400'
+                          : 'text-emerald-400'
+                    }`}
+                  >
+                    {language === 'en'
+                      ? `6h Outlook: ${localizedLstmStatus}`
+                      : `Proyeksi 6J: ${localizedLstmStatus}`}
+                  </span>
                 </div>
-              </div>
-              <div className="my-auto py-2">
-                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight block`}>
-                  {latestReading ? (
-                    latestReading.local_rain === 0 ? (language === 'en' ? 'Dry / Clear' : 'Kering / Cerah') :
-                    latestReading.local_rain === 1 ? (language === 'en' ? 'Rain Droplets' : 'Tetesan Hujan') :
-                    latestReading.local_rain === 2 ? (language === 'en' ? 'Wet Droplets' : 'Basah Presipitasi') : (language === 'en' ? 'Heavy Rain' : 'Hujan Lebat')
-                  ) : (language === 'en' ? 'Dry / Clear' : 'Kering / Cerah')}
-                </span>
-                <span className="text-[10px] text-slate-400 font-sans mt-0.5 block truncate">
-                  {language === 'en' ? 'Probe detects drops (anti-corrosion)' : 'Probe kapasitif deteksi tetesan air'}
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-[9px] font-mono pt-2 border-t border-white/5 text-slate-400">
-                <span className="text-pink-400 font-bold">GPIO34 (SOIL AO)</span>
-                <span className={latestReading && latestReading.local_rain > 0 ? 'text-amber-400 font-bold' : 'text-emerald-400 font-semibold'}>
-                  CAPACITIVE V2.0
-                </span>
-              </div>
+              )}
             </div>
 
-            {/* 2. Sensor Muka Air Ultrasonik (JSN-SR04T Waterproof) */}
-            <div className={`flex flex-col justify-between ${themeBgInner} rounded-xl p-4 border border-white/5 shadow-inner`}>
-              <div className="flex items-center justify-between">
-                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider font-semibold`}>
-                  {language === 'en' ? 'Water Surface Distance' : 'Jarak Pantul Sensor'}
-                </span>
-                <div className="p-1.5 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                  <Radio className="w-4 h-4" />
-                </div>
-              </div>
-              <div className="my-auto py-2">
-                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight block`}>
-                  {latestReading?.distance != null ? (
-                    `${latestReading.distance} cm`
-                  ) : (
-                    `${Math.max(0, Math.round(((config?.reference_height || 300) - (latestReading?.water_level || 0)) * 10) / 10)} cm`
-                  )}
-                </span>
-                <span className="text-[10px] text-slate-400 font-sans mt-0.5 block truncate">
-                  {language === 'en' ? 'Ultrasonic ToF over drain boom' : 'Waktu pantul gema ToF air'}
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-[9px] font-mono pt-2 border-t border-white/5 text-slate-400">
-                <span className="text-amber-400 font-bold">GPIO05(T) • GPIO18(E)</span>
-                <span className="text-emerald-400 font-semibold">JSN-SR04T</span>
-              </div>
-            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+              {[
+                {
+                  label: 'Horizon T+30m',
+                  value: lstmForecast ? lstmForecast.prediction_30m : latestPrediction?.prediction_30m,
+                  conf: lstmForecast ? lstmForecast.confidence_30m : latestPrediction?.confidence_score,
+                  accentText: 'text-[#3B82F6]',
+                },
+                {
+                  label: language === 'en' ? 'Horizon T+1 Hour' : 'Horizon T+1 Jam',
+                  value: lstmForecast ? lstmForecast.prediction_1h : latestPrediction?.prediction_1h,
+                  conf: lstmForecast ? lstmForecast.confidence_1h : (latestPrediction ? Math.round(latestPrediction.confidence_score * 0.95) : undefined),
+                  accentText: 'text-[#3B82F6]',
+                },
+                {
+                  label: language === 'en' ? 'Horizon T+3 Hours' : 'Horizon T+3 Jam',
+                  value: lstmForecast ? lstmForecast.prediction_3h : latestPrediction?.prediction_3h,
+                  conf: lstmForecast ? lstmForecast.confidence_3h : (latestPrediction ? Math.round(latestPrediction.confidence_score * 0.88) : undefined),
+                  accentText: 'text-violet-400',
+                },
+                {
+                  label: language === 'en' ? 'Horizon T+6 Hours' : 'Horizon T+6 Jam',
+                  value: lstmForecast ? lstmForecast.prediction_6h : latestPrediction?.prediction_6h,
+                  conf: lstmForecast ? lstmForecast.confidence_6h : (latestPrediction ? Math.round(latestPrediction.confidence_score * 0.78) : undefined),
+                  accentText: 'text-amber-400',
+                },
+              ].map((card) => {
+                const delta =
+                  lstmForecast && typeof card.value === 'number'
+                    ? Math.round((card.value - lstmForecast.currentLevel) * 10) / 10
+                    : null;
+                const deltaColor =
+                  delta === null
+                    ? themeTextMuted
+                    : delta > 0.5
+                      ? 'text-amber-400'
+                      : delta < -0.5
+                        ? 'text-emerald-400'
+                        : themeTextMuted;
 
-            {/* 3. Catu Daya Mandiri (4S Li-ion 18650 & Buck Converter 14.8V -> 5V) */}
-            <div className={`flex flex-col justify-between ${themeBgInner} rounded-xl p-4 border border-white/5 shadow-inner`}>
-              <div className="flex items-center justify-between">
-                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider font-semibold`}>
-                  {language === 'en' ? 'Power Supply & Buck' : 'Catu Daya Baterai & Buck'}
-                </span>
-                <div className="p-1.5 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-                  <Battery className="w-4 h-4" />
-                </div>
-              </div>
-              <div className="my-auto py-2">
-                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight block`}>
-                  14.8V <span className="text-sm font-normal text-cyan-400">➔</span> 5.0V
-                </span>
-                <span className="text-[10px] text-slate-400 font-sans mt-0.5 block truncate">
-                  {language === 'en' ? 'Regulated step-down converter' : 'Regulasi Buck Converter stabil'}
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-[9px] font-mono pt-2 border-t border-white/5 text-slate-400">
-                <span className="text-cyan-400 font-bold">4S 18650 LI-ION</span>
-                <span className="text-emerald-400 font-semibold">BUCK CONVERTER</span>
-              </div>
-            </div>
-
-            {/* 4. Unit Kendali RTU (ESP32 WROOM 32D Mandiri) */}
-            <div className={`flex flex-col justify-between ${themeBgInner} rounded-xl p-4 border border-white/5 shadow-inner`}>
-              <div className="flex items-center justify-between">
-                <span className={`text-[10px] ${themeTextMuted} font-sans uppercase tracking-wider font-semibold`}>
-                  {language === 'en' ? 'RTU Microcontroller' : 'Mikrokontroler RTU'}
-                </span>
-                <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                  <Cpu className="w-4 h-4" />
-                </div>
-              </div>
-              <div className="my-auto py-2">
-                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'} tracking-tight block`}>
-                  ESP32 WROOM
-                </span>
-                <span className="text-[10px] text-slate-400 font-sans mt-0.5 block truncate">
-                  {language === 'en' ? 'Wi-Fi native • Deep-Sleep cycle' : 'Wi-Fi internal • Siklus sleep'}
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-[9px] font-mono pt-2 border-t border-white/5 text-slate-400">
-                <span className="text-emerald-400 font-bold">32D DUAL-CORE</span>
-                <span className="text-[#3B82F6] font-semibold">{language === 'en' ? 'NO ARDUINO / SIM' : 'TANPA ARDUINO & SIM'}</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Footer Specification Bar */}
-          <div className={`pt-3 border-t border-white/5 flex flex-col sm:flex-row items-start sm:items-center justify-between text-[9.5px] font-mono ${themeTextMuted} gap-1.5`}>
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-slate-400 font-bold uppercase">{language === 'en' ? 'Circuit Wiring:' : 'Skema Rangkaian:'}</span>
-              <span className={isDark ? 'text-white/80' : 'text-slate-700'}>
-                ESP32 WROOM 32D • JSN-SR04T (GPIO05/18) • Capacitive Rain V2.0 (GPIO34) • Buck 14.8V➔5V • 4S Li-ion
-              </span>
-            </div>
-            <div className="flex items-center gap-1 text-slate-400">
-              <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
-              <span>{language === 'en' ? 'Capacitive probe mounted on housing to detect raindrops (anti-corrosion)' : 'Sensor kelembaban kapasitif dipasang di atas box untuk mendeteksi tetesan hujan (bebas korosi)'}</span>
+                return (
+                  <div
+                    key={card.label}
+                    className={`rounded-xl border p-4 flex flex-col justify-between ${
+                      isDark ? 'bg-white/[0.02] border-white/[0.06]' : 'bg-slate-50/80 border-slate-200/80'
+                    }`}
+                  >
+                    <div className={`flex justify-between items-center ${themeTextMuted} font-mono text-[10px] uppercase tracking-wider`}>
+                      <span>{card.label}</span>
+                      <Clock className={`w-3.5 h-3.5 ${card.accentText}`} />
+                    </div>
+                    <div className="my-2.5 flex items-baseline justify-between gap-2">
+                      <span className={`text-3xl font-sans font-light tracking-tight tabular-nums ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                        {typeof card.value === 'number' ? card.value.toFixed(1) : '--'}
+                        <span className="text-xs font-normal text-slate-400 ml-1">cm</span>
+                      </span>
+                      {delta !== null && (
+                        <span className={`font-mono text-[10px] tabular-nums ${deltaColor}`}>
+                          {delta > 0 ? `+${delta.toFixed(1)}` : delta.toFixed(1)} cm
+                        </span>
+                      )}
+                    </div>
+                    <div className={`text-[10px] font-mono tabular-nums flex items-center justify-between pt-2 border-t ${themeBorder}`}>
+                      <span className={themeTextMuted}>{language === 'en' ? 'Confidence' : 'Keyakinan'}</span>
+                      <span className={`font-semibold ${card.accentText}`}>
+                        {typeof card.conf === 'number' ? `${card.conf}%` : '--%'}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
-
-      {/* MODAL SKEMA RANGKAIAN HARDWARE RTU SIMBA */}
-      {showWiringModal && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in overflow-y-auto">
-          <div className={`w-full max-w-4xl my-auto ${isDark ? 'bg-[#0D0D0F] border-white/10 text-white' : 'bg-white border-slate-200 text-slate-800 shadow-2xl'} rounded-2xl p-6 sm:p-8 border relative`}>
-            {/* Modal Close Button */}
-            <button
-              type="button"
-              onClick={() => setShowWiringModal(false)}
-              className={`absolute top-5 right-5 p-2 rounded-xl border ${
-                isDark ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-400' : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-600'
-              } transition-all cursor-pointer`}
-              title={language === 'en' ? 'Close' : 'Tutup'}
-            >
-              <X className="w-5 h-5" />
-            </button>
-
-            {/* Modal Header */}
-            <div className="flex items-center gap-3 mb-6 pb-4 border-b border-white/10">
-              <div className="p-2.5 rounded-xl bg-blue-500/10 border border-blue-500/20 text-[#3B82F6]">
-                <Cpu className="w-6 h-6" />
-              </div>
-              <div>
-                <h2 className="text-xl font-bold font-sans tracking-tight">
-                  {language === 'en' ? 'SIMBA RTU Hardware Wiring & Component Architecture' : 'Skema Rangkaian Hardware & Arsitektur Komponen RTU SIMBA'}
-                </h2>
-                <p className="text-xs text-slate-400 font-mono mt-0.5">
-                  {language === 'en'
-                    ? 'Real Presentation Design • Kukusan Drainage Monitoring Unit'
-                    : 'Desain Rangkaian Proyek Capstone • Pos Monitoring Drainase Kukusan'}
-                </p>
-              </div>
-            </div>
-
-            {/* Visual Component Diagram Layout matching the uploaded presentation diagram */}
-            <div className={`p-5 rounded-2xl border ${isDark ? 'bg-black/60 border-white/10' : 'bg-slate-50 border-slate-200'} mb-6`}>
-              <div className="text-[10px] font-mono uppercase tracking-widest text-slate-400 mb-4 flex items-center justify-between">
-                <span className="font-bold">{language === 'en' ? 'ENCLOSURE COMPONENT LAYOUT & PIN CONNECTIONS' : 'TATA LETAK KOMPONEN DALAM BOX ENCLOSURE & KONEKSI PIN'}</span>
-                <span className="text-emerald-400 font-bold">100% STANDALONE RTU</span>
-              </div>
-
-              {/* Component Grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                
-                {/* Cyan: Buck Converter */}
-                <div className="p-4 rounded-xl border border-cyan-500/40 bg-cyan-950/20 flex flex-col justify-between">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold text-cyan-400 font-mono uppercase">BUCK CONVERTER 14.8V ➔ 5V</span>
-                    <span className="px-2 py-0.5 rounded text-[9px] font-mono bg-cyan-500/20 text-cyan-300 font-bold">DC-DC STEP-DOWN</span>
-                  </div>
-                  <p className="text-[11px] text-slate-300 mb-3 leading-relaxed">
-                    Menurunkan tegangan tinggi 14.8V (baterai) menjadi 5.0V DC stabil untuk menyuplai ESP32 dan modul-modul sensor.
-                  </p>
-                  <div className="grid grid-cols-2 gap-2 text-[10px] font-mono pt-2 border-t border-cyan-500/20">
-                    <span className="text-rose-400 font-bold">VIN+ : 14.8V Bat (+)</span>
-                    <span className="text-slate-400 font-bold">VIN- : Bat (-)</span>
-                    <span className="text-rose-400 font-bold">VOUT+ : 5V Rail</span>
-                    <span className="text-slate-400 font-bold">VOUT- : Common GND</span>
-                  </div>
-                </div>
-
-                {/* Green: ESP32 WROOM 32D */}
-                <div className="p-4 rounded-xl border border-emerald-500/40 bg-emerald-950/20 flex flex-col justify-between">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold text-emerald-400 font-mono uppercase">ESP32 WROOM 32D</span>
-                    <span className="px-2 py-0.5 rounded text-[9px] font-mono bg-emerald-500/20 text-emerald-300 font-bold">CORE RTU</span>
-                  </div>
-                  <p className="text-[11px] text-slate-300 mb-3 leading-relaxed">
-                    Mikrokontroler 32-bit dual-core mandiri dengan Wi-Fi bawaan. Bekerja tanpa bantuan Arduino dan tanpa modul SIM GSM!
-                  </p>
-                  <div className="grid grid-cols-3 gap-1.5 text-[10px] font-mono pt-2 border-t border-emerald-500/20">
-                    <span className="text-purple-400 font-bold">GPIO34 : SOIL AO</span>
-                    <span className="text-amber-400 font-bold">GPIO05 : TRIG</span>
-                    <span className="text-amber-400 font-bold">GPIO18 : ECHO</span>
-                  </div>
-                </div>
-
-                {/* White: 4 Li-ion Batteries */}
-                <div className="p-4 rounded-xl border border-slate-300/40 bg-white/5 flex flex-col justify-between">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold text-slate-200 font-mono uppercase">4 LI-ION BATTERIES (4S 18650)</span>
-                    <span className="px-2 py-0.5 rounded text-[9px] font-mono bg-white/10 text-slate-200 font-bold">OFF-GRID POWER</span>
-                  </div>
-                  <p className="text-[11px] text-slate-300 mb-3 leading-relaxed">
-                    4 sel baterai 18650 dihubungkan secara seri menghasilkan nominal 14.8V (hingga 16.8V full charge) untuk catu daya mandiri di tiang lapangan.
-                  </p>
-                  <div className="flex items-center justify-between text-[10px] font-mono pt-2 border-t border-white/10 text-slate-400">
-                    <span>Konfigurasi: 4S 1P</span>
-                    <span className="text-emerald-400 font-bold">14.8V NOMINAL</span>
-                  </div>
-                </div>
-
-                {/* Pink: Capacitive Soil Moisture Sensor V2.0 */}
-                <div className="p-4 rounded-xl border border-pink-500/40 bg-pink-950/20 flex flex-col justify-between">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold text-pink-400 font-mono uppercase">CAPACITIVE SENSOR V2.0</span>
-                    <span className="px-2 py-0.5 rounded text-[9px] font-mono bg-pink-500/20 text-pink-300 font-bold">DETEKTOR HUJAN</span>
-                  </div>
-                  <p className="text-[11px] text-slate-300 mb-3 leading-relaxed">
-                    <strong className="text-pink-300">Penting:</strong> Sensor ini <span className="underline">tidak ditancapkan di tanah</span>, melainkan dipasang menghadap ke atas/luar wadah untuk mendeteksi tetesan air hujan. Menggunakan metode kapasitif berisolasi polimer sehingga <span className="text-pink-300">bebas karat / anti-korosi</span> dibandingkan FC-37!
-                  </p>
-                  <div className="grid grid-cols-3 gap-1 text-[10px] font-mono pt-2 border-t border-pink-500/20">
-                    <span className="text-rose-400">VCC : 5V</span>
-                    <span className="text-slate-400">GND : GND</span>
-                    <span className="text-purple-400 font-bold">AO : GPIO34</span>
-                  </div>
-                </div>
-
-                {/* Yellow: JSN-SR04T Waterproof Ultrasonic Sensor */}
-                <div className="p-4 rounded-xl border border-amber-500/40 bg-amber-950/20 flex flex-col justify-between md:col-span-2">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold text-amber-400 font-mono uppercase">JSN-SR04T WATERPROOF ULTRASONIC TRANSDUCER</span>
-                    <span className="px-2 py-0.5 rounded text-[9px] font-mono bg-amber-500/20 text-amber-300 font-bold">SENSOR MUKA AIR DRAINASE</span>
-                  </div>
-                  <p className="text-[11px] text-slate-300 mb-3 leading-relaxed">
-                    Transduser kedap air yang dipasang pada lengan pipa boom PVC menjorok di atas saluran drainase Kukusan. Memancarkan pulsa ultrasonik 40kHz dan mendeteksi pantulan gema dari permukaan air untuk menghitung elevasi air secara kontinu (20 cm - 300 cm).
-                  </p>
-                  <div className="grid grid-cols-4 gap-2 text-[10px] font-mono pt-2 border-t border-amber-500/20">
-                    <span className="text-rose-400 font-bold">VCC : 5V</span>
-                    <span className="text-slate-400 font-bold">GND : GND</span>
-                    <span className="text-amber-400 font-bold">TRIG : GPIO05</span>
-                    <span className="text-amber-400 font-bold">ECHO : GPIO18</span>
-                  </div>
-                </div>
-
-              </div>
-            </div>
-
-            {/* 3 Pillars Explanations */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs mb-6 font-sans">
-              <div className={`p-3.5 rounded-xl border ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
-                <div className="flex items-center gap-2 mb-1.5 font-bold text-[#3B82F6]">
-                  <CheckCircle2 className="w-4 h-4 text-[#3B82F6] shrink-0" />
-                  <span>Tanpa Arduino & SIM</span>
-                </div>
-                <p className="text-slate-400 text-[11px] leading-relaxed">
-                  ESP32 WROOM 32D sudah memiliki prosesor mandiri berkekuatan tinggi serta radio Wi-Fi terintegrasi. Tidak diperlukan Arduino eksternal maupun kartu SIM seluler.
-                </p>
-              </div>
-
-              <div className={`p-3.5 rounded-xl border ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
-                <div className="flex items-center gap-2 mb-1.5 font-bold text-pink-400">
-                  <CheckCircle2 className="w-4 h-4 text-pink-400 shrink-0" />
-                  <span>Soil Sensor Sebagai Detektor Hujan</span>
-                </div>
-                <p className="text-slate-400 text-[11px] leading-relaxed">
-                  Sensor kelembaban tanah kapasitif ditaruh di atas box untuk mendeteksi kebasahan akibat tetesan hujan. Berbeda dengan pelat FC-37 yang mudah berkarat, sensor kapasitif ini tahan cuaca ekstrem.
-                </p>
-              </div>
-
-              <div className={`p-3.5 rounded-xl border ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
-                <div className="flex items-center gap-2 mb-1.5 font-bold text-emerald-400">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <span>Tanpa DHT22 (Fusi Cuaca BMKG)</span>
-                </div>
-                <p className="text-slate-400 text-[11px] leading-relaxed">
-                  Tidak ada modul DHT22 di dalam box. Data suhu, kelembaban makro, dan prediksi cuaca diintegrasikan secara cerdas dari API resmi Stasiun Klimatologi BMKG Kukusan/Beji.
-                </p>
-              </div>
-            </div>
-
-            {/* Close button */}
-            <div className="flex justify-end pt-2 border-t border-white/10">
-              <button
-                type="button"
-                onClick={() => setShowWiringModal(false)}
-                className="px-5 py-2.5 rounded-xl bg-[#3B82F6] hover:bg-blue-600 text-black font-bold text-xs font-mono transition-all cursor-pointer shadow-lg"
-              >
-                {language === 'en' ? 'Close Diagram' : 'Tutup Skema Rangkaian'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       </div>
+      )}
 
     </div>
   );

@@ -6,31 +6,124 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import { createSocket } from 'node:dgram';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, addDoc, getDocs, query, orderBy, limit, setDoc, doc, onSnapshot, deleteDoc, where } from 'firebase/firestore';
+import { initializeFirestore, setLogLevel, collection, addDoc, getDocs, query, orderBy, limit, setDoc, doc, onSnapshot, deleteDoc, where } from 'firebase/firestore';
+import { createCiliwungEngine } from './backend/ciliwung/simulation-engine.mjs';
+import { registerCiliwungRoutes } from './backend/ciliwung/ciliwung-api.mjs';
+import { createForecastWorker } from './backend/ciliwung/forecast-worker.mjs';
+import { createHardware20sWorker, registerHardwareDemoForecast } from './backend/ciliwung/hardware-demo-forecast.mjs';
+import { createHardwareLiveBus, registerHardwareLiveRoutes, createCiliwungModeController } from './backend/ciliwung/hardware-live.mjs';
+import { createCupCarbonTelemetryListener } from './backend/ciliwung/cupcarbon-telemetry.mjs';
+import { sendForecastCupCarbon } from './backend/ciliwung/forecast-udp.mjs';
+import { createWeatherContextHandler } from './backend/ciliwung/weather-context.mjs';
+import { normalizeReading } from './src/normalize-reading.mjs';
+import { runLstmForecast } from './src/ml/lstmEngine.ts';
 
 dotenv.config();
 
-const PORT = 3000;
+// Prevent internal gRPC stream reconnect notices from polluting logs
+setLogLevel('error');
+
+const PORT = Number(process.env.PORT) || 3000;
 const app = express();
+
+// CORS middleware so split deployments (e.g. Vercel frontend -> Railway backend) work seamlessly for REST & SSE
+const configuredAllowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    const isAllowed =
+      configuredAllowedOrigins.length === 0 ||
+      configuredAllowedOrigins.includes('*') ||
+      configuredAllowedOrigins.includes(origin);
+    if (isAllowed) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, Last-Event-ID');
+  if (req.path.includes('/stream')) {
+    res.setHeader('X-Accel-Buffering', 'no');
+  }
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 app.use(express.json());
 
-// 1. Initialize Firebase inside Node using credentials from the applet config file
+app.get('/api/health', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    ok: true,
+    service: 'simba-backend',
+    runtime: process.env.RAILWAY_ENVIRONMENT ? 'railway' : (process.env.NODE_ENV || 'development'),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// 1. Initialize Firebase inside Node using env vars or optional local applet config file
 const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
-let firebaseConfig: any = {};
+let fileFirebaseConfig: Record<string, any> = {};
 if (fs.existsSync(configPath)) {
-  firebaseConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-} else {
-  console.warn('Warning: firebase-applet-config.json not found. Database features may fail.');
+  fileFirebaseConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+}
+
+function pickRealEnv(...candidates: Array<string | undefined>): string | undefined {
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const trimmed = candidate.trim();
+    if (!trimmed) continue;
+    if (/^(MY_|YOUR_|REPLACE_|CHANGE_ME)/i.test(trimmed)) continue;
+    return trimmed;
+  }
+  return undefined;
+}
+
+const firebaseConfig: Record<string, any> = {
+  projectId: pickRealEnv(process.env.FIREBASE_PROJECT_ID, process.env.VITE_FIREBASE_PROJECT_ID, fileFirebaseConfig.projectId),
+  appId: pickRealEnv(process.env.FIREBASE_APP_ID, process.env.VITE_FIREBASE_APP_ID, fileFirebaseConfig.appId),
+  apiKey: pickRealEnv(process.env.FIREBASE_API_KEY, process.env.VITE_FIREBASE_API_KEY, fileFirebaseConfig.apiKey),
+  authDomain: pickRealEnv(process.env.FIREBASE_AUTH_DOMAIN, process.env.VITE_FIREBASE_AUTH_DOMAIN, fileFirebaseConfig.authDomain),
+  firestoreDatabaseId: pickRealEnv(process.env.FIREBASE_DATABASE_ID, process.env.VITE_FIREBASE_DATABASE_ID, fileFirebaseConfig.firestoreDatabaseId),
+  storageBucket: pickRealEnv(process.env.FIREBASE_STORAGE_BUCKET, process.env.VITE_FIREBASE_STORAGE_BUCKET, fileFirebaseConfig.storageBucket),
+  messagingSenderId: pickRealEnv(process.env.FIREBASE_MESSAGING_SENDER_ID, process.env.VITE_FIREBASE_MESSAGING_SENDER_ID, fileFirebaseConfig.messagingSenderId),
+};
+
+if (!firebaseConfig.projectId || !firebaseConfig.apiKey) {
+  console.warn('Warning: Firebase config not found in env vars or firebase-applet-config.json. Database features may fail.');
 }
 
 const firebaseApp = initializeApp(firebaseConfig);
-const db = firebaseConfig.firestoreDatabaseId
-  ? getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId)
-  : getFirestore(firebaseApp);
+const rawDbId = firebaseConfig.firestoreDatabaseId;
+const dbId = (
+  firebaseConfig.projectId !== 'simba-c6ad8' &&
+  rawDbId &&
+  rawDbId !== '(default)' &&
+  !rawDbId.includes('ai-studio-simbamonitoringt')
+)
+  ? rawDbId
+  : undefined;
+
+const db = initializeFirestore(
+  firebaseApp,
+  {
+    experimentalForceLongPolling: true,
+  },
+  dbId
+);
 
 // 2. Initialize Gemini API Client
 const ai = new GoogleGenAI({
@@ -76,6 +169,95 @@ onSnapshot(doc(db, 'system_config', DEFAULT_NODE_ID), (snapshot) => {
   }
 }, (error) => {
   console.error('[Server] Error listening to config changes:', error);
+});
+
+// ==========================================
+// 🌊 CILIWUNG SIMULATION & HARDWARE LIVE BUS
+// ==========================================
+let udpControlSocket: ReturnType<typeof createSocket> | null = null;
+try {
+  udpControlSocket = createSocket('udp4');
+  udpControlSocket.on('error', () => {});
+} catch {
+  udpControlSocket = null;
+}
+
+function safeSendUdp(payload: unknown, port?: number) {
+  if (!udpControlSocket || !port) return;
+  try {
+    udpControlSocket.send(Buffer.from(JSON.stringify(payload)), port, '127.0.0.1');
+  } catch {
+    // CupCarbon local UDP bridge is optional in cloud deployments
+  }
+}
+
+const ciliwungEngine = createCiliwungEngine();
+const ciliwungForecastWorker = createForecastWorker();
+const hardware20sWorker = createHardware20sWorker();
+const hardwareLiveBus = createHardwareLiveBus({
+  sendCupCarbon: (commands: any[]) => {
+    for (const cmd of commands) {
+      safeSendUdp(cmd, cmd.controlPort);
+    }
+  },
+} as any);
+
+const ciliwungModeController = createCiliwungModeController({
+  hardwareBus: hardwareLiveBus,
+  resetSimulation: async () => {
+    ciliwungEngine.stop();
+    ciliwungEngine.reset();
+  },
+} as any);
+
+try {
+  const cupCarbonTelemetry = createCupCarbonTelemetryListener({
+    onTelemetry: (telemetry: any) => ciliwungEngine.recordCupCarbonTelemetry(telemetry),
+    onStale: () => ciliwungEngine.markCupCarbonStale(),
+    onError: () => {},
+  });
+  cupCarbonTelemetry.listening.catch(() => {});
+} catch {
+  // Optional UDP telemetry listener
+}
+
+function publishHardwareBusReading(levelCm: number, measuredAtMs?: number, simulated = false) {
+  if (!Number.isFinite(levelCm) || levelCm < 0 || levelCm > 1000) return;
+  try {
+    hardwareLiveBus.publishReading({
+      levelCm,
+      thresholdSiaga: Number(currentConfig.threshold_siaga ?? 60),
+      thresholdBahaya: Number(currentConfig.threshold_bahaya ?? 90),
+      measuredAt: new Date(Number.isFinite(measuredAtMs) ? (measuredAtMs as number) : Date.now()).toISOString(),
+      simulated,
+    });
+  } catch (err) {
+    console.warn('[HardwareLiveBus] publish skipped:', err);
+  }
+}
+
+function toTimestampMs(ts: any): number {
+  if (typeof ts === 'number') return ts < 10_000_000_000 ? ts * 1000 : ts;
+  if (ts && typeof ts.toMillis === 'function') return ts.toMillis();
+  if (typeof ts === 'string') return Date.parse(ts);
+  return NaN;
+}
+
+// Mirror latest Firestore reading into hardwareLiveBus (supports direct ESP32 Firestore writes as well)
+onSnapshot(query(collection(db, 'sensor_readings'), orderBy('timestamp', 'desc'), limit(1)), (snap) => {
+  if (snap.empty) return;
+  const raw = snap.docs[0].data();
+  const norm = normalizeReading(raw, currentConfig.reference_height || 300);
+  if (typeof norm?.water_level === 'number' && Number.isFinite(norm.water_level)) {
+    const tsMs = toTimestampMs(raw.timestamp);
+    const src = String(norm.source || '').toLowerCase();
+    const isSim = src.includes('simulat') || src.includes('scenario');
+    if (!isSim || currentConfig.auto_simulation) {
+      publishHardwareBusReading(norm.water_level, Number.isFinite(tsMs) ? tsMs : Date.now(), isSim);
+    }
+  }
+}, (error) => {
+  console.warn('[HardwareLiveBus] Firestore mirror listener warning:', error?.message || error);
 });
 
 // Sound velocity correction based on temperature (Celsius)
@@ -172,17 +354,24 @@ async function generateSimulationData(isManual = false, overrideWaterLevel?: num
 
     const timestamp = Date.now();
 
-    // Store ONLY the essential sensor reading document (No spamming bmkg_forecast or predictions collections)
+    // Store essential sensor reading document with Soil Moisture telemetry
+    const soilMoistureVal = rainStatus === 0 ? 38 : rainStatus === 1 ? 55 : rainStatus === 2 ? 78 : 94;
+    const soilStatusLabel = rainStatus === 0 ? 'Lembap Normal' : rainStatus === 1 ? 'Lembap' : rainStatus === 2 ? 'Basah (Infiltrasi)' : 'Jenuh Air (Risiko Luapan)';
+
     const readingRef = await addDoc(collection(db, 'sensor_readings'), {
       timestamp,
       water_level: correctedLevel,
       distance: Math.round(distanceRaw * 10) / 10,
+      soil_moisture: soilMoistureVal,
+      soil_status: soilStatusLabel,
       source: 'Simulator-Engine',
       local_rain: rainStatus,
       temperature: Math.round(temp * 10) / 10,
       humidity: Math.round(humidity * 10) / 10,
       node_id: currentConfig.node_id,
     });
+
+    publishHardwareBusReading(correctedLevel, timestamp, true);
 
     console.log(`[Simulator] Manual Tick: mode=${currentConfig.simulation_mode}, Level=${correctedLevel}cm.`);
 
@@ -396,166 +585,308 @@ function translateConditionToEn(c: string): string {
   return map[c] || c;
 }
 
-// Get live local weather information card data utilizing real-time official BMKG API with Open-Meteo fallback
-app.get('/api/live-weather', async (req, res) => {
-  const isEn = (req.query.lang as string) === 'en' || (req.query.language as string) === 'en';
-  let temp = 32;
-  let humidity = 45;
-  let precip: string | number = "0 mm";
-  let condition = "Cerah";
-  let windSpeed = 6.7;
-  let windDir = "Selatan ↑";
-  let visibilityVal: string | number = "< 9 km";
-  let weatherIcon = "";
-  let locationName = "Pondok Cina, Beji, Kota Depok";
-  let lastUpdated = new Date().toLocaleTimeString(isEn ? 'en-US' : 'id-ID', { hour: '2-digit', minute: '2-digit' }) + (isEn ? ' WIB' : ' WIB');
-  let isFromBMKG = false;
+// Helper to format a Date or ISO string in Asia/Jakarta (WIB)
+function formatWibTime(date: Date): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Jakarta',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const hh = parts.find((p) => p.type === 'hour')?.value || '00';
+  const mm = parts.find((p) => p.type === 'minute')?.value || '00';
+  return `${hh}.${mm} WIB`;
+}
 
-  // List of subdistrict adm4 codes for Depok Beji region requested by the user
+function parseBmkgLocalDatetime(localDt: string, isEn: boolean): { hourWib: string; dateLabel: string; fullLabel: string } {
+  // BMKG local_datetime format: "2026-11-20 22:00:00" (already in Asia/Jakarta WIB)
+  const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(localDt || '');
+  if (!match) {
+    return { hourWib: '—', dateLabel: '', fullLabel: localDt || '—' };
+  }
+  const [, year, monthStr, dayStr, hh, mm] = match;
+  const monthIdx = Math.max(0, Math.min(11, Number(monthStr) - 1));
+  const monthsId = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+  const monthsEn = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const monthName = (isEn ? monthsEn : monthsId)[monthIdx];
+  const dayNum = Number(dayStr);
+  const hourWib = `${hh}.${mm} WIB`;
+  const dateLabel = `${dayNum} ${monthName}`;
+  return {
+    hourWib,
+    dateLabel,
+    fullLabel: `${dayNum} ${monthName} ${year}, ${hourWib}`,
+  };
+}
+
+function getBmkgIconForWmoCode(code: number, hourWib: number): string {
+  const period = hourWib >= 6 && hourWib < 18 ? 'am' : 'pm';
+  let slug = 'berawan';
+  if (code === 0) slug = 'cerah';
+  else if (code === 1 || code === 2) slug = 'cerah berawan';
+  else if (code === 3) slug = 'berawan';
+  else if (code === 45 || code === 48) slug = 'kabut';
+  else if (code === 51 || code === 53 || code === 55 || code === 61 || code === 80) slug = 'hujan ringan';
+  else if (code === 63 || code === 81) slug = 'hujan sedang';
+  else if (code === 65 || code === 82) slug = 'hujan lebat';
+  else if (code >= 95) slug = 'hujan petir';
+  return `https://api-apps.bmkg.go.id/storage/icon/cuaca/${encodeURIComponent(slug)}-${period}.svg`;
+}
+
+function getCleanConditionIdFromWmo(code: number): string {
+  if (code === 0) return 'Cerah';
+  if (code === 1 || code === 2) return 'Cerah Berawan';
+  if (code === 3) return 'Berawan';
+  if (code === 45 || code === 48) return 'Kabut';
+  if (code === 51 || code === 53 || code === 55 || code === 61 || code === 80) return 'Hujan Ringan';
+  if (code === 63 || code === 81) return 'Hujan Sedang';
+  if (code === 65 || code === 82) return 'Hujan Lebat';
+  if (code >= 95) return 'Hujan Petir';
+  return getWeatherCondition(code);
+}
+
+// In-memory live weather cache (3-minute fresh TTL per language; also serves stale snapshot on transient upstream timeout)
+const liveWeatherCache = new Map<string, { payload: Record<string, any>; cachedAt: number }>();
+const LIVE_WEATHER_TTL_MS = 3 * 60 * 1000;
+
+// Get live local weather directly from official BMKG Public API (with complete Open-Meteo fallback if BMKG returns empty data)
+app.get('/api/live-weather', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const isEn = (req.query.lang as string) === 'en' || (req.query.language as string) === 'en';
+  const forceRefresh = req.query.force === '1' || req.query.force === 'true';
+  const cacheKey = isEn ? 'en' : 'id';
+  const cached = liveWeatherCache.get(cacheKey);
+  if (!forceRefresh && cached && Date.now() - cached.cachedAt < LIVE_WEATHER_TTL_MS) {
+    return res.json(cached.payload);
+  }
+
+  const fetchedAtWib = formatWibTime(new Date());
+
+  // Official BMKG ADM4 endpoints for Beji, Kota Depok (Kukusan primary — field test site; Pondok Cina & Beji Timur fallback)
   const bmkgUrls = [
-    'https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=32.76.06.1005', // Pondok Cina
-    'https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=32.76.06.1006', // Kukusan
-    'https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=32.76.06.1002'  // Beji
+    'https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=32.76.06.1002', // Kukusan (publik)
+    'https://api-apps.bmkg.go.id/api/df/v1/forecast/adm?adm4=32.76.06.1002', // Kukusan (apps)
+    'https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=32.76.06.1005', // Pondok Cina (fallback)
+    'https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=32.76.06.1006', // Beji Timur (fallback)
   ];
 
-  // Step 1: Try to fetch directly from BMKG API
+  // Step 1: Fetch verbatim data directly from BMKG public API (with bounded per-request timeout)
   for (const url of bmkgUrls) {
     try {
-      console.log(`[API] Fetching real-time weather from BMKG: ${url}`);
-      const bmkgRes = await fetch(url);
-      if (bmkgRes.ok) {
-        const bmkgData = await bmkgRes.json();
-        if (bmkgData && bmkgData.data && bmkgData.data[0] && bmkgData.data[0].cuaca) {
-          const flatCuaca = bmkgData.data[0].cuaca.flat();
-          if (flatCuaca.length > 0) {
-            // Find forecast closest to current local time
-            const now = new Date();
-            let closestItem = flatCuaca[0];
-            let minDiff = Infinity;
-            
-            for (const item of flatCuaca) {
-              const itemDate = new Date(item.datetime || item.local_datetime);
-              const diff = Math.abs(itemDate.getTime() - now.getTime());
-              if (diff < minDiff) {
-                minDiff = diff;
-                closestItem = item;
-              }
-            }
+      const bmkgRes = await fetch(url, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(4500),
+      });
+      if (!bmkgRes.ok) continue;
 
-            temp = closestItem.t;
-            humidity = closestItem.hu;
-            precip = `${closestItem.tp || 0} mm`;
-            condition = closestItem.weather_desc;
-            windSpeed = closestItem.ws;
-            windDir = getBMKGWindDirection(closestItem.wd);
-            visibilityVal = closestItem.vs_text || (closestItem.vs ? `< ${Math.ceil(closestItem.vs / 1000)} km` : '< 10 km');
-            weatherIcon = closestItem.image || '';
-            
-            if (bmkgData.lokasi) {
-              locationName = `${bmkgData.lokasi.desa}, ${bmkgData.lokasi.kecamatan}, ${bmkgData.lokasi.kotkab}`;
-            }
-            
-            isFromBMKG = true;
-            console.log(`[API] BMKG direct success for ${locationName}. Temp: ${temp}°C, Humidity: ${humidity}%, Wind: ${windSpeed} km/h, Condition: ${condition}`);
-            break;
-          }
+      const bmkgData = await bmkgRes.json();
+      const rawGroups = bmkgData?.data?.[0]?.cuaca;
+      if (!Array.isArray(rawGroups)) continue;
+
+      const flatCuaca = rawGroups.flat().filter((item: any) => item && typeof item.t === 'number');
+      if (flatCuaca.length === 0) continue;
+
+      // Pick the BMKG forecast slot closest to current UTC instant
+      const nowMs = Date.now();
+      let closestIdx = 0;
+      let minDiff = Infinity;
+
+      for (let i = 0; i < flatCuaca.length; i++) {
+        const item = flatCuaca[i];
+        const parsedMs = item.datetime
+          ? Date.parse(item.datetime)
+          : Date.parse(`${String(item.local_datetime || '').replace(' ', 'T')}+07:00`);
+        if (Number.isNaN(parsedMs)) continue;
+        const diff = Math.abs(parsedMs - nowMs);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closestIdx = i;
         }
       }
+
+      const currentSlot = flatCuaca[closestIdx];
+      const slotTime = parseBmkgLocalDatetime(currentSlot.local_datetime || '', isEn);
+
+      const rawWindDirId = currentSlot.wd ? getBMKGWindDirection(currentSlot.wd) : '—';
+      const finalWindDir = currentSlot.wd
+        ? (isEn ? translateWindDirectionToEn(rawWindDirId) : rawWindDirId)
+        : '—';
+
+      const finalCondition = isEn
+        ? (currentSlot.weather_desc_en || translateConditionToEn(currentSlot.weather_desc || ''))
+        : (currentSlot.weather_desc || '—');
+
+      // Mirror official BMKG web: if API returns vs: null / vs_text: null, display '—' (do not invent '< 10 km')
+      const visibilityVal =
+        typeof currentSlot.vs_text === 'string' && currentSlot.vs_text.trim().length > 0
+          ? currentSlot.vs_text.trim()
+          : (typeof currentSlot.vs === 'number' && currentSlot.vs > 0
+              ? `${(currentSlot.vs / 1000).toFixed(1)} km`
+              : '—');
+
+      const lokasi = bmkgData.lokasi || {};
+      const locationParts = [lokasi.desa, lokasi.kecamatan, lokasi.kotkab].filter(Boolean);
+      const locationName = locationParts.length > 0 ? locationParts.join(', ') : 'Kukusan, Beji, Kota Depok';
+
+      // Real upcoming 3-hourly BMKG slots directly from the same API payload
+      const upcomingSlots = flatCuaca.slice(closestIdx + 1, closestIdx + 5).map((slot: any) => {
+        const parsed = parseBmkgLocalDatetime(slot.local_datetime || '', isEn);
+        const slotWindId = slot.wd ? getBMKGWindDirection(slot.wd) : '—';
+        return {
+          time_wib: parsed.hourWib.replace(' WIB', ''),
+          date_label: parsed.dateLabel,
+          temperature_c: slot.t,
+          humidity_percent: slot.hu,
+          precipitation_mm: typeof slot.tp === 'number' ? slot.tp : 0,
+          condition: isEn
+            ? (slot.weather_desc_en || translateConditionToEn(slot.weather_desc || ''))
+            : (slot.weather_desc || '—'),
+          wind_speed_kph: typeof slot.ws === 'number' ? slot.ws : null,
+          wind_direction: slot.wd ? (isEn ? translateWindDirectionToEn(slotWindId) : slotWindId) : '—',
+          weather_icon: slot.image || '',
+        };
+      });
+
+      const payload = {
+        source: 'BMKG',
+        adm4: lokasi.adm4 || '32.76.06.1002',
+        location_name: locationName,
+        temperature_c: currentSlot.t,
+        humidity_percent: currentSlot.hu,
+        precipitation_mm: typeof currentSlot.tp === 'number' ? `${currentSlot.tp} mm` : '—',
+        condition: finalCondition,
+        wind_speed_kph: typeof currentSlot.ws === 'number' ? currentSlot.ws : null,
+        wind_direction: finalWindDir,
+        visibility_km: visibilityVal,
+        cloud_cover_percent: typeof currentSlot.tcc === 'number' ? currentSlot.tcc : null,
+        weather_icon: currentSlot.image || '',
+        valid_at: slotTime.fullLabel,
+        valid_hour_wib: slotTime.hourWib,
+        analysis_date: currentSlot.analysis_date || null,
+        last_updated: fetchedAtWib,
+        forecast_slots: upcomingSlots,
+      };
+      liveWeatherCache.set(cacheKey, { payload, cachedAt: Date.now() });
+      return res.json(payload);
     } catch (err) {
       console.warn(`[API] BMKG fetch failed for URL: ${url}`, err);
     }
   }
 
-  // Fallback to Open-Meteo if BMKG is entirely unreachable
-  if (!isFromBMKG) {
-    try {
-      console.log('[API] BMKG APIs failed, falling back to Open-Meteo for Kukusan region.');
-      const weatherRes = await fetch('https://api.open-meteo.com/v1/forecast?latitude=-6.4025&longitude=106.7942&current=temperature_2m,relative_humidity_2m,precipitation,weather_code,wind_speed_10m,wind_direction_10m,visibility&wind_speed_unit=kmh&timezone=Asia/Jakarta');
-      if (weatherRes.ok) {
-        const weatherData = await weatherRes.json();
-        if (weatherData && weatherData.current) {
-          temp = Math.round(weatherData.current.temperature_2m);
-          humidity = weatherData.current.relative_humidity_2m;
-          precip = `${weatherData.current.precipitation} mm`;
-          condition = getWeatherCondition(weatherData.current.weather_code);
-          
-          if (weatherData.current.wind_speed_10m !== undefined) {
-            windSpeed = Number(weatherData.current.wind_speed_10m);
-          }
-          if (weatherData.current.wind_direction_10m !== undefined) {
-            windDir = getWindDirection(weatherData.current.wind_direction_10m);
-          }
-          if (weatherData.current.visibility !== undefined) {
-            const visKm = weatherData.current.visibility / 1000;
-            visibilityVal = visKm < 10 ? `< ${Math.ceil(visKm)} km` : `${Math.round(visKm)} km`;
-          }
-          locationName = "Kukusan (Beji, Kota Depok)";
-          console.log(`[API] Open-Meteo fallback success. Temp: ${temp}°C, Humidity: ${humidity}%, Wind: ${windSpeed} km/h (${windDir}), Visibility: ${visibilityVal}`);
-        }
-      }
-    } catch (err) {
-      console.warn('[API] Open-Meteo fetch failed too, using defaults:', err);
-    }
-  }
-
-  const finalWindDir = isEn ? translateWindDirectionToEn(windDir) : windDir;
-  const finalCondition = isEn ? translateConditionToEn(condition) : condition;
-
-  // Step 2: Query Gemini with Google Search Grounding to extract active warnings and generate a customized expert summary
+  // Step 2: Complete real Open-Meteo fallback when BMKG public API returns empty cuaca[] or is unreachable
   try {
-    console.log('[API] Enhancing BMKG weather with Gemini Google Search Grounding alerts.');
-    const prompt = isEn
-      ? `Search for active weather alerts (such as flood warning, heavy rain, thunderstorms) from BMKG specifically for Depok and South Jakarta today. Provide answer as JSON with field: "alerts" (array of strings, empty array if none) and "summary" (concise weather summary string in English based on real-time BMKG data: location ${locationName}, temperature ${temp}°C, humidity ${humidity}%, precipitation ${precip}, condition ${finalCondition}, wind ${windSpeed} km/h from ${finalWindDir}). Output pure JSON only without markdown code wraps.`
-      : `Cari informasi peringatan dini cuaca aktif (seperti potensi banjir, hujan lebat, angin kencang) dari BMKG khusus untuk Kota Depok dan Jakarta Selatan hari ini. Berikan jawaban dalam bentuk JSON dengan field: "alerts" (array of strings, kosongkan jika tidak ada peringatan aktif) dan "summary" (string ringkasan cuaca hari ini dalam Bahasa Indonesia berdasarkan data BMKG real-time: lokasi ${locationName}, suhu ${temp}°C, kelembaban ${humidity}%, curah hujan ${precip}, kondisi ${condition}, angin ${windSpeed} km/jam dari ${windDir}). Pastikan output hanyalah JSON murni tanpa pembungkus markdown code wraps.`;
+    console.warn('[API] BMKG endpoints returned empty cuaca[], falling back to Open-Meteo hourly + current.');
+    const weatherRes = await fetch(
+      'https://api.open-meteo.com/v1/forecast?latitude=-6.3662&longitude=106.8186&current=temperature_2m,relative_humidity_2m,precipitation,weather_code,wind_speed_10m,wind_direction_10m,visibility,cloud_cover&hourly=temperature_2m,relative_humidity_2m,precipitation,weather_code,wind_speed_10m,wind_direction_10m&forecast_days=2&wind_speed_unit=kmh&timezone=Asia/Jakarta',
+      { signal: AbortSignal.timeout(5000) }
+    );
+    if (weatherRes.ok) {
+      const weatherData = await weatherRes.json();
+      const cur = weatherData?.current;
+      if (cur && typeof cur.temperature_2m === 'number') {
+        const curParsed = parseBmkgLocalDatetime(cur.time || '', isEn);
+        const curHourMatch = /T(\d{2}):/.exec(cur.time || '');
+        const curHourWib = curHourMatch ? Number(curHourMatch[1]) : new Date().getUTCHours() + 7;
+        const rawCondId = getCleanConditionIdFromWmo(Number(cur.weather_code));
+        const rawWindId = typeof cur.wind_direction_10m === 'number' ? getWindDirection(cur.wind_direction_10m) : '—';
+        const visKm = typeof cur.visibility === 'number' && cur.visibility > 0
+          ? `${(cur.visibility / 1000).toFixed(1)} km`
+          : '—';
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
-      contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-        responseMimeType: 'application/json',
-      },
-    });
+        // Build 4 real upcoming 3-hourly slots (+3h, +6h, +9h, +12h WIB) from Open-Meteo hourly array
+        const upcomingSlots: Array<{
+          time_wib: string;
+          date_label: string;
+          temperature_c: number;
+          humidity_percent: number | null;
+          precipitation_mm: number;
+          condition: string;
+          wind_speed_kph: number | null;
+          wind_direction: string;
+          weather_icon: string;
+        }> = [];
 
-    const text = response.text.trim();
-    const cleanedJson = text.replace(/^```json\s*/i, '').replace(/```$/, '').trim();
-    const geminiData = JSON.parse(cleanedJson);
+        const hTimes: string[] = Array.isArray(weatherData?.hourly?.time) ? weatherData.hourly.time : [];
+        if (hTimes.length > 0) {
+          const nowMs = Date.now();
+          let startIdx = hTimes.findIndex((t) => Date.parse(`${t}:00+07:00`) > nowMs);
+          if (startIdx < 0) startIdx = 0;
 
-    return res.json({
-      precipitation_mm: precip,
-      temperature_c: temp,
-      humidity_percent: humidity,
-      condition: finalCondition,
-      wind_speed_kph: windSpeed,
-      wind_direction: finalWindDir,
-      visibility_km: visibilityVal,
-      weather_icon: weatherIcon,
-      location_name: locationName,
-      alerts: geminiData.alerts || [],
-      last_updated: lastUpdated,
-      summary: geminiData.summary || (isEn
-        ? `Current weather in ${locationName} is ${finalCondition} with temperature ${temp}°C, humidity ${humidity}%, and wind at ${windSpeed} km/h from ${finalWindDir}. No severe flood warnings currently active.`
-        : `Kondisi cuaca saat ini di ${locationName} terpantau ${condition} dengan suhu udara ${temp}°C, kelembapan ${humidity}%, angin berhembus ${windSpeed} km/jam dari ${windDir}. Tidak ada peringatan dini bencana banjir aktif.`)
-    });
-  } catch (error: any) {
-    console.log('[INFO] live-weather Gemini enhancement fallback.');
-    return res.json({
-      precipitation_mm: precip,
-      temperature_c: temp,
-      humidity_percent: humidity,
-      condition: finalCondition,
-      wind_speed_kph: windSpeed,
-      wind_direction: finalWindDir,
-      visibility_km: visibilityVal,
-      weather_icon: weatherIcon,
-      location_name: locationName,
-      alerts: [],
-      last_updated: lastUpdated,
-      summary: isEn
-        ? `Weather in ${locationName} is ${finalCondition} with temperature ${temp}°C, humidity ${humidity}%, and wind from ${finalWindDir}. BMKG monitoring runs in standard automated mode.`
-        : `Kondisi cuaca wilayah ${locationName} terpantau ${condition} dengan suhu udara ${temp}°C, kelembaban ${humidity}%, dan arah angin dari ${windDir}. Layanan peringatan dini BMKG dialihkan ke mode pemantauan lokal otomatis.`
-    });
+          // Step every 3 hours to mirror BMKG's 3-hourly forecast cadence
+          for (let k = 0; k < 4; k++) {
+            const idx = startIdx + k * 3;
+            if (idx >= hTimes.length) break;
+            const tStr = hTimes[idx];
+            const parsed = parseBmkgLocalDatetime(tStr, isEn);
+            const hrMatch = /T(\d{2}):/.exec(tStr);
+            const hrWib = hrMatch ? Number(hrMatch[1]) : 12;
+            const wCode = Number(weatherData.hourly.weather_code?.[idx] ?? 3);
+            const condId = getCleanConditionIdFromWmo(wCode);
+            const windDeg = weatherData.hourly.wind_direction_10m?.[idx];
+            const slotWindId = typeof windDeg === 'number' ? getWindDirection(windDeg) : '—';
+
+            upcomingSlots.push({
+              time_wib: parsed.hourWib.replace(' WIB', ''),
+              date_label: parsed.dateLabel,
+              temperature_c: Math.round(Number(weatherData.hourly.temperature_2m?.[idx] ?? cur.temperature_2m)),
+              humidity_percent:
+                typeof weatherData.hourly.relative_humidity_2m?.[idx] === 'number'
+                  ? Math.round(weatherData.hourly.relative_humidity_2m[idx])
+                  : null,
+              precipitation_mm:
+                typeof weatherData.hourly.precipitation?.[idx] === 'number'
+                  ? Math.round(weatherData.hourly.precipitation[idx] * 10) / 10
+                  : 0,
+              condition: isEn ? translateConditionToEn(condId) : condId,
+              wind_speed_kph:
+                typeof weatherData.hourly.wind_speed_10m?.[idx] === 'number'
+                  ? Math.round(weatherData.hourly.wind_speed_10m[idx] * 10) / 10
+                  : null,
+              wind_direction:
+                slotWindId !== '—' ? (isEn ? translateWindDirectionToEn(slotWindId) : slotWindId) : '—',
+              weather_icon: getBmkgIconForWmoCode(wCode, hrWib),
+            });
+          }
+        }
+
+        const payload = {
+          source: 'Open-Meteo',
+          adm4: '32.76.06.1002',
+          location_name: 'Kukusan, Beji, Kota Depok',
+          temperature_c: Math.round(cur.temperature_2m),
+          humidity_percent: cur.relative_humidity_2m ?? null,
+          precipitation_mm: typeof cur.precipitation === 'number' ? `${cur.precipitation} mm` : '—',
+          condition: isEn ? translateConditionToEn(rawCondId) : rawCondId,
+          wind_speed_kph: typeof cur.wind_speed_10m === 'number' ? Number(cur.wind_speed_10m) : null,
+          wind_direction: rawWindId !== '—' ? (isEn ? translateWindDirectionToEn(rawWindId) : rawWindId) : '—',
+          visibility_km: visKm,
+          cloud_cover_percent: typeof cur.cloud_cover === 'number' ? cur.cloud_cover : null,
+          weather_icon: getBmkgIconForWmoCode(Number(cur.weather_code), curHourWib),
+          valid_at: curParsed.fullLabel !== '—' ? curParsed.fullLabel : fetchedAtWib,
+          valid_hour_wib: fetchedAtWib,
+          analysis_date: null,
+          last_updated: fetchedAtWib,
+          forecast_slots: upcomingSlots,
+        };
+        liveWeatherCache.set(cacheKey, { payload, cachedAt: Date.now() });
+        return res.json(payload);
+      }
+    }
+  } catch (err) {
+    console.warn('[API] Open-Meteo fallback failed:', err);
   }
+
+  // If we have a previously fetched real snapshot, return it instead of failing hard during transient upstream outage
+  if (cached) {
+    return res.json(cached.payload);
+  }
+
+  // Never invent fake weather numbers if both upstream services fail
+  return res.status(503).json({
+    error: isEn
+      ? 'Official BMKG weather API is currently unreachable.'
+      : 'API prakiraan cuaca resmi BMKG sedang tidak dapat dijangkau.',
+  });
 });
 
 // Intelligent Water Level prognostic analyzer using gemini-3.1-pro-preview with HIGH Thinking Mode
@@ -628,41 +959,67 @@ You MUST respond strictly in the following JSON structure. Do NOT use markdown c
     const result = JSON.parse(response.text.trim());
     res.json(result);
   } catch (error: any) {
-    console.log('[INFO] predict: using local physical prognostic model.');
-    
-    const readings = req.body.readings || [];
-    const latestReading = readings[readings.length - 1];
-    const curLevel = latestReading ? latestReading.level : 35;
+    console.log('[INFO] predict: falling back to local trained LSTM model (model_lstm_banjir.h5).');
+
+    const readings = Array.isArray(req.body.readings) ? req.body.readings : [];
+    const levels = readings
+      .map((r: any) => (typeof r?.level === 'number' ? r.level : typeof r?.water_level === 'number' ? r.water_level : NaN))
+      .filter((v: number) => Number.isFinite(v));
     const reqConfig = req.body.config || {};
-    const tSiaga = reqConfig.threshold_siaga || 60;
-    const tBahaya = reqConfig.threshold_bahaya || 90;
+    const tSiaga = Number(reqConfig.threshold_siaga) || 60;
+    const tBahaya = Number(reqConfig.threshold_bahaya) || 90;
+    const refHeight = Number(reqConfig.reference_height) || 300;
 
-    let status: 'Normal' | 'Siaga' | 'Bahaya' = 'Normal';
-    if (curLevel >= tBahaya) {
-      status = 'Bahaya';
-    } else if (curLevel >= tSiaga) {
-      status = 'Siaga';
-    }
+    const lstm = runLstmForecast(levels.length > 0 ? levels : [35], {
+      thresholdSiaga: tSiaga,
+      thresholdBahaya: tBahaya,
+      maxReferenceHeight: refHeight,
+    });
 
-    // Generate realistic predictions based on current status
-    const mult = status === 'Bahaya' ? 1.08 : status === 'Siaga' ? 1.04 : 1.01;
-    const pred30m = Math.max(10, Math.round((curLevel * mult) * 10) / 10);
-    const pred1h = Math.max(10, Math.round((curLevel * Math.pow(mult, 1.5)) * 10) / 10);
-    const pred3h = Math.max(10, Math.round((curLevel * Math.pow(mult, 2)) * 10) / 10);
-    const pred6h = Math.max(10, Math.round((curLevel * Math.pow(mult, 0.5)) * 10) / 10);
+    const curLevel = lstm?.currentLevel ?? 35;
+    const pred30m = lstm?.prediction_30m ?? curLevel;
+    const pred1h = lstm?.prediction_1h ?? curLevel;
+    const pred3h = lstm?.prediction_3h ?? curLevel;
+    const pred6h = lstm?.prediction_6h ?? curLevel;
+    const status = lstm?.status ?? 'Normal';
 
     return res.json({
       prediction_30m: pred30m,
       prediction_1h: pred1h,
       prediction_3h: pred3h,
       prediction_6h: pred6h,
-      confidence_score: 88,
-      status: status,
-      reasoning: `⚡ [SISTEM ANALISIS HIDROLOGI MANDIRI - SIMBA RTU EDGE]
-Hasil analisis telemetri dihitung secara real-time melalui modul komputasi prediktif mandiri (Fail-safe Edge Model) RTU SIMBA:
+      confidence_score: lstm?.confidence_1h ?? 88,
+      status,
+      lstm,
+      reasoning: `[INFERENSI LSTM TERLATIH — model_lstm_banjir.h5]
+Prediksi elevasi muka air dihitung langsung menggunakan jaringan saraf LSTM(64→32)→Dense(16→1) dengan bobot terlatih (29.857 parameter, MAE validasi 2.86 cm):
 
-Berdasarkan pembacaan aktual sensor tinggi muka air saat ini sebesar ${curLevel} cm (Ambang Batas Siaga: ${tSiaga} cm, Bahaya: ${tBahaya} cm), status aliran terpantau dalam tingkat: ${status}. Kompensasi fusi suhu DHT22 terhadap kecepatan suara gelombang ultrasonik JSN-SR04T berjalan dengan presisi optimal (Terkalibrasi). Disarankan untuk tetap memantau telemetri real-time dan mengikuti instruksi siaga bencana dari BPBD DKI secara terpadu.`
+Tinggi air aktual: ${curLevel} cm (Siaga: ${tSiaga} cm, Bahaya: ${tBahaya} cm). Proyeksi LSTM: T+30m = ${pred30m} cm, T+1j = ${pred1h} cm, T+3j = ${pred3h} cm, T+6j = ${pred6h} cm (Proyeksi Status: ${status}).`
     });
+  }
+});
+
+// Direct trained LSTM inference endpoint (model_lstm_banjir.h5 + scaler.pkl)
+app.post('/api/lstm-predict', (req, res) => {
+  try {
+    const rawLevels = Array.isArray(req.body?.levels)
+      ? req.body.levels
+      : Array.isArray(req.body?.readings)
+        ? req.body.readings.map((r: any) => (typeof r === 'number' ? r : r?.water_level ?? r?.level))
+        : [];
+    const levels = rawLevels.filter((v: any) => typeof v === 'number' && Number.isFinite(v));
+    if (levels.length === 0) {
+      return res.status(400).json({ error: 'levels array with at least 1 numeric water level (cm) is required' });
+    }
+    const result = runLstmForecast(levels, {
+      thresholdSiaga: Number(req.body?.threshold_siaga) || currentConfig.threshold_siaga || 60,
+      thresholdBahaya: Number(req.body?.threshold_bahaya) || currentConfig.threshold_bahaya || 90,
+      maxReferenceHeight: Number(req.body?.reference_height) || currentConfig.reference_height || 300,
+    });
+    return res.json(result);
+  } catch (err: any) {
+    console.error('[LSTM API] Inference error:', err);
+    return res.status(500).json({ error: err?.message || 'LSTM inference failed' });
   }
 });
 
@@ -670,6 +1027,7 @@ Berdasarkan pembacaan aktual sensor tinggi muka air saat ini sebesar ${curLevel}
 async function resetSimulationData() {
   stopManualScenario();
   currentConfig.auto_simulation = false;
+  hardwareLiveBus.reset();
 
   try {
     // Persist auto_simulation: false to Firestore system_config for active node
@@ -841,6 +1199,8 @@ const handleHardwareTelemetry = async (req: express.Request, res: express.Respon
       node_id = DEFAULT_NODE_ID, 
       distance, 
       water_level, 
+      soil_moisture,
+      soil,
       temperature = 28.5, 
       humidity = 70.0, 
       local_rain = 0 
@@ -849,6 +1209,8 @@ const handleHardwareTelemetry = async (req: express.Request, res: express.Respon
     const tempVal = Number(temperature) || 28.5;
     const humVal = Number(humidity) || 70.0;
     const rainVal = Number(local_rain) || 0;
+    const soilVal = typeof soil_moisture === 'number' ? Number(soil_moisture) : typeof soil === 'number' ? Number(soil) : 42;
+    const soilStatusVal = soilVal >= 85 ? 'Jenuh Air' : soilVal >= 65 ? 'Basah' : soilVal >= 35 ? 'Lembap Normal' : 'Kering';
 
     // Calculate water level from ultrasonic distance if water_level not explicitly passed
     let finalWaterLevel = 0;
@@ -875,13 +1237,17 @@ const handleHardwareTelemetry = async (req: express.Request, res: express.Respon
     await addDoc(collection(db, 'sensor_readings'), {
       timestamp: now,
       water_level: finalWaterLevel,
+      soil_moisture: soilVal,
+      soil_status: soilStatusVal,
       temperature: tempVal,
       humidity: humVal,
       local_rain: rainVal,
       node_id: node_id,
       distance: typeof distance === 'number' ? distance : Math.max(0, currentConfig.reference_height - finalWaterLevel),
-      source: 'Hardware-ESP32'
+      source: 'Hardware-ESP32-SoilWake'
     });
+
+    publishHardwareBusReading(finalWaterLevel, now, false);
 
     console.log(`[Hardware Telemetry] Received from ${node_id}: Level=${finalWaterLevel}cm, Temp=${tempVal}°C, Status=${alertStatus}`);
 
@@ -1017,6 +1383,8 @@ app.post('/api/telemetry/batch', express.json(), async (req, res) => {
       source: 'Hardware-ESP32-Batch'
     });
 
+    publishHardwareBusReading(finalWaterLevel, now, false);
+
     console.log(`[Batch Telemetry] Successfully processed 360 batch samples (${batchDataPairs.length} points) from ${node_id}. Representative Level: ${finalWaterLevel}cm (Status: ${alertStatus})`);
 
     // Log if alarm condition
@@ -1096,22 +1464,123 @@ app.get('/:audioFile(alarm_siaga.mp3|alarm_bahaya.mp3|siaga.mp3|bahaya.mp3)', (r
   res.status(404).send('Not Found');
 });
 
+// ==========================================
+// 🌊 CILIWUNG SIMULATION, LIVE MAP & FORECAST ROUTES
+// ==========================================
+registerCiliwungRoutes(app, {
+  engine: ciliwungEngine,
+  worker: ciliwungForecastWorker,
+  sendCupCarbon: (state: any) => {
+    if (!Array.isArray(state?.cupNodes)) return;
+    for (const node of state.cupNodes) {
+      safeSendUdp(
+        {
+          type: 'node_update',
+          mode: 'simulation',
+          runId: state.runId,
+          nodeId: node.id,
+          cupcarbonNodeId: node.cupcarbonNodeId,
+          tmaCm: node.tmaCm,
+          status: node.status,
+          timestampUtc: state.timestampUtc,
+        },
+        node.controlPort || 5101
+      );
+    }
+  },
+  sendForecastCupCarbon: (command: any) => {
+    if (!udpControlSocket) return;
+    try {
+      sendForecastCupCarbon(udpControlSocket, command);
+    } catch {
+      // Optional UDP bridge
+    }
+  },
+});
 
+registerHardwareLiveRoutes(app, { bus: hardwareLiveBus });
+registerHardwareDemoForecast(app, hardware20sWorker);
+
+app.get('/api/ciliwung-weather/context', createWeatherContextHandler());
+
+app.get('/api/ciliwung-mode', (_req, res) => {
+  res.json({ mode: ciliwungModeController.mode });
+});
+
+app.post('/api/ciliwung-mode', async (req, res) => {
+  try {
+    const nextMode = await ciliwungModeController.switchTo(req.body?.mode);
+    return res.json({ success: true, mode: nextMode });
+  } catch (err: any) {
+    return res.status(400).json({ success: false, error: err?.message || 'Unsupported Ciliwung mode' });
+  }
+});
 
 // Serve static assets and mount Vite middleware
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
+  const public3dPath = path.join(process.cwd(), 'public', '3d');
+  const dist3dPath = path.join(process.cwd(), 'dist', '3d');
+  const viewer3dPath = process.env.NODE_ENV === 'production' && fs.existsSync(dist3dPath) ? dist3dPath : public3dPath;
+
+  if (fs.existsSync(viewer3dPath)) {
+    app.use(
+      '/3d',
+      express.static(viewer3dPath, {
+        etag: true,
+        setHeaders: (res, filePath) => {
+          const ext = path.extname(filePath).toLowerCase();
+          if (ext === '.html' || ext === '.js' || ext === '.css') {
+            res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+          } else {
+            res.setHeader('Cache-Control', 'public, max-age=86400');
+          }
+        },
+      })
+    );
+  }
+
+  const publicReportsPath = path.join(process.cwd(), 'public', 'reports');
+  const distReportsPath = path.join(process.cwd(), 'dist', 'reports');
+  const reportsPath = process.env.NODE_ENV === 'production' && fs.existsSync(distReportsPath) ? distReportsPath : publicReportsPath;
+
+  if (fs.existsSync(reportsPath)) {
+    app.use(
+      '/reports',
+      express.static(reportsPath, {
+        etag: true,
+        setHeaders: (res, filePath) => {
+          if (path.extname(filePath).toLowerCase() === '.pdf') {
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Cache-Control', 'no-cache');
+          }
+        },
+      })
+    );
+  }
+
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_SERVICE_ID);
+
+  if (!isProduction) {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, allowedHosts: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    if (fs.existsSync(distPath)) {
+      app.use(express.static(distPath));
+      app.get('*', (req, res, next) => {
+        if (req.path.startsWith('/api/')) return next();
+        const indexPath = path.join(distPath, 'index.html');
+        if (fs.existsSync(indexPath)) {
+          return res.sendFile(indexPath);
+        }
+        return res.status(404).json({ error: 'Not found' });
+      });
+    }
   }
 
   app.listen(PORT, '0.0.0.0', () => {
