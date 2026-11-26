@@ -72,3 +72,8 @@ Desktop.ini
 *.swp
 *~
 
+# 9. AI Studio Chat Attachments & Temp Media Cache
+.tempmediastorage/
+.aistudio/
+public/assets/aistudio/
+
