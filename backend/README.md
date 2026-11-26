@@ -58,7 +58,7 @@ Direktori ini memuat arsitektur dan layanan **Backend Server (Express + TypeScri
 |---|---|
 | `POST /api/predict` | Memproses analisis & prediksi kondisi banjir berbasis **Gemini AI** (`@google/genai`) + konteks sensor dan BMKG. |
 | `POST /api/lstm-predict` | Menjalankan inferensi model deep learning **LSTM** untuk proyeksi elevasi **T+30m, T+1 Jam, T+3 Jam, T+6 Jam**. |
-| `GET /api/live-weather` | Mengambil prakiraan cuaca aktual **API BMKG** (di-cache di Firestore agar tetap stabil saat API BMKG lambat/tidak responsif). |
+| `GET /api/live-weather` | Mengambil prakiraan cuaca aktual **API BMKG** dengan *in-memory cache* 3 menit, batas *timeout*, *fallback* Open-Meteo & *stale snapshot*, serta parameter `?force=1` untuk muat ulang paksa. |
 | `POST /api/search-news` | Menarik ringkasan informasi cuaca dan berita kondisi banjir terkini. |
 | `POST /api/sim-data` | Memicu injeksi data simulasi (*normal / siaga / bahaya*) untuk pengujian & demo dashboard. |
 

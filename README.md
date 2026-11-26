@@ -96,7 +96,7 @@ SIMBA/
 │   │   ├── types.ts                         # Interface & Model Data Telemetri TypeScript
 │   │   ├── App.tsx                          # Root Layout, Navigasi, Bahasa (ID/EN), Tema (Dark/Light)
 │   │   └── README.md                        # Dokumentasi Khusus Frontend
-│   ├── public/                              # Aset Statis & Audio Alarm Siaga/Bahaya
+│   ├── public/                              # Aset Statis (Audio Alarm, Aset 3D Ciliwung & Centerline Peta)
 │   └── index.html                           # SPA Entry Point
 │
 ├── 🖥️ BACKEND & SIMULATION SUBSYSTEM (server.ts & backend/)
@@ -189,7 +189,7 @@ Pipeline pengolahan data di sisi cloud dan engine prediksi:
 ### A. Dashboard SCADA Live & Admin Panel
 - **Monitoring Real-Time**: Elevasi air drainase/sungai Depok–Jakarta live dari Firebase Firestore, dapat diakses langsung dari *smartphone* tanpa instalasi aplikasi.
 - **Grafik Aktual & Prediksi LSTM 4 Horizon**: Visualisasi terpadu menggunakan Recharts lengkap dengan garis batas **Siaga** (default `≥ 60 cm`) dan **Bahaya** (default `≥ 90 cm`), serta deteksi otomatis ketika perangkat ESP32 *offline* / data lama (*stale*).
-- **Konteks Cuaca BMKG & Asisten AI**: Menampilkan prakiraan curah hujan aktual BMKG yang di-cache di Firebase serta analisis kondisi berbasis **Gemini AI** (`@google/genai`).
+- **Konteks Cuaca BMKG & Mode Sinkron Sensor**: Menampilkan prakiraan cuaca aktual BMKG (*in-memory cache* 3 menit + *fallback* Open-Meteo) maupun mode simulasi cuaca tersinkronisasi sensor ESP32, serta analisis kondisi berbasis **Gemini AI** (`@google/genai`).
 - **Panel Admin PLC**: Pengaturan ambang batas Siaga/Bahaya dinamis, kalibrasi tinggi referensi sensor, injeksi simulasi uji, dan audit log sistem.
 - **Pengalaman Multi-Perangkat**: Mendukung mode gelap/terang (*Dark/Light Mode*), alih bahasa **Indonesia / Inggris (ID/EN)**, dan alarm suara interaktif (Web Audio API).
 
@@ -292,7 +292,7 @@ Dokumentasi lengkap payload & endpoint tersedia di [`backend/README.md`](./backe
 - `POST /api/heartbeat` — Laporan status online/offline, RSSI Wi-Fi, baterai, dan *uptime* node.
 - `GET /api/config` — Mengambil konfigurasi ambang batas Siaga/Bahaya dan tinggi referensi terbaru.
 - `POST /api/predict` & `POST /api/lstm-predict` — Inferensi prediksi banjir (Gemini AI & model LSTM terlatih).
-- `GET /api/live-weather` — Mengambil prakiraan cuaca BMKG aktual (dengan mekanisme cache).
+- `GET /api/live-weather` — Mengambil prakiraan cuaca BMKG aktual (dengan *cache* 3 menit, batas *timeout*, dan *fallback* Open-Meteo; mendukung `?force=1`).
 - `POST /api/sim-data` — Injeksi skenario uji simulasi untuk demo dashboard.
 - `GET/POST /api/ciliwung-simulation/*` — Kontrol simulasi 9-node DAS Ciliwung, stream SSE, dan replay hujan 24 jam.
 
