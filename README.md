@@ -27,39 +27,63 @@ Indonesia menghadapi ancaman banjir berskala besar setiap tahunnya. Berdasarkan 
 
 ## 🏗️ Arsitektur Sistem (4 Lapisan)
 
-```text
-                        +------------------------------------------------------------------------------+
-                        |                         1. SENSOR LAYER (Lapangan)                           |
-                        |   * JSN-SR04T (Waterproof Ultrasonic IP67, 20-450 cm)                        |
-                        |   * Capacitive Soil Moisture Sensor V1.2 (Deteksi Basah/Kering)              |
-                        +--------------------------------------+---------------------------------------+
-                                                               |
-                                                               v
-                        +------------------------------------------------------------------------------+
-                        |                     2. PROCESSING & EDGE LAYER (Node RTU)                    |
-                        |   * ESP32 WROOM (Wi-Fi 2.4 GHz, ULP Deep Sleep)                              |
-                        |   * Median Filter (N=5) -> Buffer 360 Sampel (~6 menit) di LittleFS          |
-                        |   * Daya: Baterai Li-Ion 4S (14,8 V) + Buck Converter LM2596 (5,05 V)        |
-                        +--------------------------------------+---------------------------------------+
-                                                               |  (Batch Upload via Wi-Fi / HTTPS)
-                                                               v
-                        +------------------------------------------------------------------------------+
-                        |                       3. CLOUD, BACKEND & AI LAYER                           |
-                        |   * Firebase Firestore (sensor_readings, system_config, system_logs,         |
-                        |     bmkg_forecast, predictions)                                              |
-                        |   * Backend Express + TypeScript (Kalibrasi, Batch Ingest, BMKG Cache)       |
-                        |   * Model Deep Learning LSTM (model_lstm_banjir.h5) + Gemini AI              |
-                        |   * Engine Simulasi 9-Node DAS Ciliwung & CupCarbon Telemetry (Port 5005)    |
-                        +--------------------------------------+---------------------------------------+
-                                                               |  (Realtime Snapshot + REST/SSE)
-                                                               v
-                        +------------------------------------------------------------------------------+
-                        |                     4. PRESENTATION LAYER (Web SCADA SIMBA)                  |
-                        |   * Dashboard SCADA Live (Grafik Recharts, 4-Horizon LSTM, Cuaca BMKG)       |
-                        |   * Simulasi 3D Interaktif (Three.js N1-N5) & Peta Koridor 2D (9 Node)       |
-                        |   * Panel Admin PLC (Threshold Siaga/Bahaya, Kalibrasi, Simulasi Uji)        |
-                        |   * Bilingual ID/EN, Dark/Light Mode, Alarm Audio Darurat (Web Audio API)    |
-                        +------------------------------------------------------------------------------+
+```mermaid
+flowchart TB
+    subgraph L1["1. SENSOR LAYER - Lapangan"]
+        direction LR
+        S1["JSN-SR04T\nUltrasonic IP67\nJarak 20-450 cm"]
+        S2["Capacitive Soil V1.2\nDeteksi Basah/Hujan\nSensor Tahan Korosi"]
+    end
+
+    subgraph L2["2. PROCESSING & EDGE - Node RTU"]
+        direction LR
+        E1["ESP32 WROOM\nWi-Fi 2.4 GHz\nULP Deep Sleep"]
+        E2["DSP & Buffer\nMedian Filter N=5\n360 Sampel LittleFS"]
+        E3["Power System\nBaterai Li-Ion 14.8V\nBuck LM2596 5.05V"]
+        E1 --- E2 --- E3
+    end
+
+    subgraph L3["3. CLOUD, BACKEND & AI LAYER"]
+        direction TB
+        C1["Firebase Firestore\nsensor_readings & config\nforecast & predictions"]
+        C2["Backend Express + TS\nKalibrasi & Batch Ingest\nBMKG Cache + Fallback"]
+        C3["Deep Learning & AI\nLSTM model_lstm_banjir\nGemini AI Interpreter"]
+        C4["Simulation Engine\nPropagasi 9-Node Ciliwung\nCupCarbon Port 5005"]
+        C1 <--> C2
+        C2 <--> C3
+        C2 <--> C4
+    end
+
+    subgraph L4["4. PRESENTATION - Web SCADA SIMBA"]
+        direction LR
+        P1["Dashboard Live\nKurva Recharts & LSTM\nCuaca & Cek Offline"]
+        P2["Simulasi 3D & 2D\nThree.js N1-N5\nLeaflet 9-Node & Replay"]
+        P3["Admin PLC & UX\nThreshold & Kalibrasi\nID/EN, Theme, Alarm"]
+    end
+
+    L1 ==>|"Data Analog & Pulsa"| L2
+    L2 ==>|"Batch Wi-Fi / HTTPS"| L3
+    L3 ==>|"Realtime & REST/SSE"| L4
+
+    style L1 fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#065f46
+    style S1 fill:#ffffff,stroke:#34d399,stroke-width:1.5px,color:#064e3b
+    style S2 fill:#ffffff,stroke:#34d399,stroke-width:1.5px,color:#064e3b
+
+    style L2 fill:#fffbeb,stroke:#f59e0b,stroke-width:2px,color:#92400e
+    style E1 fill:#ffffff,stroke:#fbbf24,stroke-width:1.5px,color:#78350f
+    style E2 fill:#ffffff,stroke:#fbbf24,stroke-width:1.5px,color:#78350f
+    style E3 fill:#ffffff,stroke:#fbbf24,stroke-width:1.5px,color:#78350f
+
+    style L3 fill:#eff6ff,stroke:#3b82f6,stroke-width:2px,color:#1e40af
+    style C1 fill:#ffffff,stroke:#60a5fa,stroke-width:1.5px,color:#1e3a8a
+    style C2 fill:#ffffff,stroke:#60a5fa,stroke-width:1.5px,color:#1e3a8a
+    style C3 fill:#ffffff,stroke:#60a5fa,stroke-width:1.5px,color:#1e3a8a
+    style C4 fill:#ffffff,stroke:#60a5fa,stroke-width:1.5px,color:#1e3a8a
+
+    style L4 fill:#f5f3ff,stroke:#8b5cf6,stroke-width:2px,color:#5b21b6
+    style P1 fill:#ffffff,stroke:#a78bfa,stroke-width:1.5px,color:#4c1d95
+    style P2 fill:#ffffff,stroke:#a78bfa,stroke-width:1.5px,color:#4c1d95
+    style P3 fill:#ffffff,stroke:#a78bfa,stroke-width:1.5px,color:#4c1d95
 ```
 
 ---
@@ -148,21 +172,80 @@ SIMBA/
 | **Sensor Suhu/Kelembaban** | **DHT22** | *Dihilangkan dari node final* | Penyederhanaan rangkaian node lapangan; konteks suhu/cuaca diambil dari API **BMKG** yang di-cache. |
 | **Konektivitas** | Modul seluler **SIM7600 / SIM7670C 4G LTE** | **Wi-Fi (built-in ESP32)** | Modul SIM yang tersedia hanya mendukung 2G dan gagal terhubung saat troubleshooting, serta memakan ~60% anggaran. Wi-Fi cukup untuk payload batch kecil tanpa biaya pulsa/paket data. |
 
-### C. Diagram Pinout Node Final (`ESP32 WROOM`)
+### C. Diagram Pinout & Pemetaan Koneksi Node Final (`ESP32 WROOM`)
 
-```text
-                             +--------------------------------------------------------------------+
-                             |                            ESP32 WROOM                             |
-                             |                                                                    |
-                             |   [5V (Buck 5.05V)]  ----------------->  VCC  (JSN-SR04T)          |
-                             |   [GND]              ----------------->  GND  (JSN-SR04T)          |
-                             |   [GPIO 5]           ----------------->  TRIG (JSN-SR04T)          |
-                             |   [GPIO 18]          <-----------------  ECHO (JSN-SR04T)          |
-                             |                                                                    |
-                             |   [3V3]              ----------------->  VCC  (Capacitive Soil)    |
-                             |   [GND]              ----------------->  GND  (Capacitive Soil)    |
-                             |   [GPIO 34 (ADC)]    <-----------------  AOUT (Capacitive Soil)    |
-                             +--------------------------------------------------------------------+
+```mermaid
+%%{init: {'flowchart': {'curve': 'stepAfter', 'nodeSpacing': 28, 'rankSpacing': 85}}}%%
+flowchart LR
+    subgraph PSU["Catu Daya & Regulasi"]
+        BAT["Baterai Li-Ion 4S\n14.8 V Nominal"]
+        BUCK["Buck Converter LM2596\n5.05 V Regulated"]
+    end
+
+    subgraph ESP["Mikrokontroler - ESP32 WROOM"]
+        P5V["5V / VIN"]
+        PGND1["GND (Ultrasonic)"]
+        PG5["GPIO 5 (Output)"]
+        PG18["GPIO 18 (Input)"]
+        P3V3["3V3 Output"]
+        PGND2["GND (Soil)"]
+        PG34["GPIO 34 (ADC1)"]
+    end
+
+    subgraph JSN["JSN-SR04T - Ultrasonic IP67"]
+        JVCC["VCC (5V)"]
+        JGND["GND"]
+        JTRIG["TRIG"]
+        JECHO["ECHO"]
+    end
+
+    subgraph SOIL["Capacitive Soil Moisture V1.2"]
+        SVCC["VCC (3.3V)"]
+        SGND["GND"]
+        SAOUT["AOUT"]
+    end
+
+    BAT ==>|"14.8 V DC"| BUCK
+    BUCK ==>|"5.05 V DC"| P5V
+
+    P5V ==>|"Kabel Merah 5V"| JVCC
+    PGND1 ---|"Kabel Hitam GND"| JGND
+    PG5 -->|"TRIG (Signal Out)"| JTRIG
+    PG18 <-->|"ECHO (Signal In)"| JECHO
+
+    P3V3 ==>|"Kabel Merah 3.3V"| SVCC
+    PGND2 ---|"Kabel Hitam GND"| SGND
+    PG34 <-->|"AOUT (Analog In)"| SAOUT
+
+    style PSU fill:#fef2f2,stroke:#ef4444,stroke-width:2px,color:#991b1b
+    style BAT fill:#ffffff,stroke:#f87171,stroke-width:1.5px,color:#7f1d1d
+    style BUCK fill:#ffffff,stroke:#f87171,stroke-width:1.5px,color:#7f1d1d
+
+    style ESP fill:#f8fafc,stroke:#1e293b,stroke-width:2.5px,color:#0f172a
+    style P5V fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px,color:#991b1b
+    style P3V3 fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px,color:#991b1b
+    style PGND1 fill:#e2e8f0,stroke:#475569,stroke-width:1.5px,color:#1e293b
+    style PGND2 fill:#e2e8f0,stroke:#475569,stroke-width:1.5px,color:#1e293b
+    style PG5 fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#1e40af
+    style PG18 fill:#d1fae5,stroke:#059669,stroke-width:1.5px,color:#065f46
+    style PG34 fill:#ede9fe,stroke:#7c3aed,stroke-width:1.5px,color:#5b21b6
+
+    style JSN fill:#ecfeff,stroke:#06b6d4,stroke-width:2px,color:#155e75
+    style JVCC fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px,color:#991b1b
+    style JGND fill:#e2e8f0,stroke:#475569,stroke-width:1.5px,color:#1e293b
+    style JTRIG fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#1e40af
+    style JECHO fill:#d1fae5,stroke:#059669,stroke-width:1.5px,color:#065f46
+
+    style SOIL fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#065f46
+    style SVCC fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px,color:#991b1b
+    style SGND fill:#e2e8f0,stroke:#475569,stroke-width:1.5px,color:#1e293b
+    style SAOUT fill:#ede9fe,stroke:#7c3aed,stroke-width:1.5px,color:#5b21b6
+
+    linkStyle 0,1,2,6 stroke:#ef4444,stroke-width:2.5px
+    linkStyle 3,7 stroke:#475569,stroke-width:2px
+    linkStyle 4 stroke:#2563eb,stroke-width:2px
+    linkStyle 5 stroke:#059669,stroke-width:2px
+    linkStyle 8 stroke:#7c3aed,stroke-width:2px
 ```
 
 ### D. Alur Firmware & Pengujian Lapangan
@@ -252,7 +335,7 @@ Pipeline pengolahan data di sisi cloud dan engine prediksi:
 ### Langkah Cepat
 ```bash
 # 1. Clone repositori
-git clone [https://github.com/Ekazadex/SIMBA.git](https://github.com/Ekazadex/SIMBA.git)
+git clone https://github.com/Ekazadex/SIMBA.git
 cd SIMBA
 
 # 2. Instal seluruh dependensi
