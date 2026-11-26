@@ -28,35 +28,38 @@ Indonesia menghadapi ancaman banjir berskala besar setiap tahunnya. Berdasarkan 
 ## 🏗️ Arsitektur Sistem (4 Lapisan)
 
 ```text
-┌────────────────────────────────────────────────────────────────────────────┐
-│ 1. SENSOR LAYER (Lapangan)                                                 │
-│    • JSN-SR04T (Waterproof Ultrasonic IP67, 20–450 cm)                     │
-│    • Capacitive Soil Moisture Sensor V1.2 (Deteksi Basah/Kering)           │
-└────────────────────────────────────┬───────────────────────────────────────┘
-                                     ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│ 2. PROCESSING & EDGE LAYER (Node RTU)                                      │
-│    • ESP32 WROOM (Wi-Fi 2.4 GHz, ULP Deep Sleep)                           │
-│    • Median Filter (N=5) → Buffer 360 Sampel (~6 menit) di LittleFS        │
-│    • Daya: Baterai Li-Ion 4S (14,8 V) + Buck Converter LM2596 (5,05 V)     │
-└────────────────────────────────────┬───────────────────────────────────────┘
-                                     ▼ (Batch Upload via Wi-Fi / HTTPS)
-┌────────────────────────────────────────────────────────────────────────────┐
-│ 3. CLOUD, BACKEND & AI LAYER                                               │
-│    • Firebase Firestore (sensor_readings, system_config, system_logs,      │
-│      bmkg_forecast, predictions)                                           │
-│    • Backend Express + TypeScript (Kalibrasi, Batch Ingest, BMKG Cache)    │
-│    • Model Deep Learning LSTM (model_lstm_banjir.h5) + Gemini AI           │
-│    • Engine Simulasi 9-Node DAS Ciliwung & CupCarbon Telemetry (Port 5005) │
-└────────────────────────────────────┬───────────────────────────────────────┘
-                                     ▼ (Realtime Snapshot + REST/SSE)
-┌────────────────────────────────────────────────────────────────────────────┐
-│ 4. PRESENTATION LAYER (Web SCADA SIMBA)                                    │
-│    • Dashboard SCADA Live (Grafik Recharts, 4-Horizon LSTM, Cuaca BMKG)    │
-│    • Simulasi 3D Interaktif (Three.js N1–N5) & Peta Koridor 2D (9 Node)    │
-│    • Panel Admin PLC (Threshold Siaga/Bahaya, Kalibrasi, Simulasi Uji)     │
-│    • Bilingual ID/EN, Dark/Light Mode, Alarm Audio Darurat (Web Audio API) │
-└────────────────────────────────────────────────────────────────────────────┘
+                        +------------------------------------------------------------------------------+
+                        |                         1. SENSOR LAYER (Lapangan)                           |
+                        |   * JSN-SR04T (Waterproof Ultrasonic IP67, 20-450 cm)                        |
+                        |   * Capacitive Soil Moisture Sensor V1.2 (Deteksi Basah/Kering)              |
+                        +--------------------------------------+---------------------------------------+
+                                                               |
+                                                               v
+                        +------------------------------------------------------------------------------+
+                        |                     2. PROCESSING & EDGE LAYER (Node RTU)                    |
+                        |   * ESP32 WROOM (Wi-Fi 2.4 GHz, ULP Deep Sleep)                              |
+                        |   * Median Filter (N=5) -> Buffer 360 Sampel (~6 menit) di LittleFS          |
+                        |   * Daya: Baterai Li-Ion 4S (14,8 V) + Buck Converter LM2596 (5,05 V)        |
+                        +--------------------------------------+---------------------------------------+
+                                                               |  (Batch Upload via Wi-Fi / HTTPS)
+                                                               v
+                        +------------------------------------------------------------------------------+
+                        |                       3. CLOUD, BACKEND & AI LAYER                           |
+                        |   * Firebase Firestore (sensor_readings, system_config, system_logs,         |
+                        |     bmkg_forecast, predictions)                                              |
+                        |   * Backend Express + TypeScript (Kalibrasi, Batch Ingest, BMKG Cache)       |
+                        |   * Model Deep Learning LSTM (model_lstm_banjir.h5) + Gemini AI              |
+                        |   * Engine Simulasi 9-Node DAS Ciliwung & CupCarbon Telemetry (Port 5005)    |
+                        +--------------------------------------+---------------------------------------+
+                                                               |  (Realtime Snapshot + REST/SSE)
+                                                               v
+                        +------------------------------------------------------------------------------+
+                        |                     4. PRESENTATION LAYER (Web SCADA SIMBA)                  |
+                        |   * Dashboard SCADA Live (Grafik Recharts, 4-Horizon LSTM, Cuaca BMKG)       |
+                        |   * Simulasi 3D Interaktif (Three.js N1-N5) & Peta Koridor 2D (9 Node)       |
+                        |   * Panel Admin PLC (Threshold Siaga/Bahaya, Kalibrasi, Simulasi Uji)        |
+                        |   * Bilingual ID/EN, Dark/Light Mode, Alarm Audio Darurat (Web Audio API)    |
+                        +------------------------------------------------------------------------------+
 ```
 
 ---
@@ -148,18 +151,18 @@ SIMBA/
 ### C. Diagram Pinout Node Final (`ESP32 WROOM`)
 
 ```text
-       ┌─────────────────────────────────────────────────────────────┐
-       │                        ESP32 WROOM                          │
-       │                                                             │
-       │   [5V (Buck 5.05V)] ──────────┬───── VCC (JSN-SR04T)        │
-       │   [GND]             ──────────┼───── GND (JSN-SR04T)        │
-       │   [GPIO 5]          ──────────┼───── TRIG (JSN-SR04T)       │
-       │   [GPIO 18]         ──────────┴───── ECHO (JSN-SR04T)       │
-       │                                                             │
-       │   [3V3]             ──────────┬───── VCC (Capacitive Soil)  │
-       │   [GND]             ──────────┼───── GND (Capacitive Soil)  │
-       │   [GPIO 34 (ADC)]   ──────────┴───── AOUT (Capacitive Soil) │
-       └─────────────────────────────────────────────────────────────┘
+                             +--------------------------------------------------------------------+
+                             |                            ESP32 WROOM                             |
+                             |                                                                    |
+                             |   [5V (Buck 5.05V)]  ----------------->  VCC  (JSN-SR04T)          |
+                             |   [GND]              ----------------->  GND  (JSN-SR04T)          |
+                             |   [GPIO 5]           ----------------->  TRIG (JSN-SR04T)          |
+                             |   [GPIO 18]          <-----------------  ECHO (JSN-SR04T)          |
+                             |                                                                    |
+                             |   [3V3]              ----------------->  VCC  (Capacitive Soil)    |
+                             |   [GND]              ----------------->  GND  (Capacitive Soil)    |
+                             |   [GPIO 34 (ADC)]    <-----------------  AOUT (Capacitive Soil)    |
+                             +--------------------------------------------------------------------+
 ```
 
 ### D. Alur Firmware & Pengujian Lapangan
@@ -177,10 +180,10 @@ Pipeline pengolahan data di sisi cloud dan engine prediksi:
 1. Backend memvalidasi batch telemetri dari node, mengoreksi jarak terhadap kecepatan rambat suara ($v = 331.3 + 0.606 \times T$), dan menghitung elevasi air ($\text{Elevasi} = \text{Tinggi Referensi} - \text{Jarak Terkoreksi}$).
 2. Data disimpan di **Firebase Firestore** bersama *snapshot* prakiraan cuaca **BMKG** yang di-cache.
 3. **Model LSTM Terlatih (`model_lstm_banjir.h5`)** memproses *time-series* elevasi air (jendela *lookback* 24 langkah) untuk menghasilkan proyeksi multi-horizon deterministik dengan latensi **10–100 ms**:
-   - **Arsitektur**: `Sequential(Input(24,1) → LSTM(64, return_sequences) → LSTM(32) → Dense(16) → Dense(1))`
-   - **Parameter Terlatih**: `29.857` parameter (*trained on 46.728 samples*, *MinMaxScaler*)
-   - **Metrik Validasi**: **MAE 2,86 cm** | **RMSE 7,40 cm** (target sistem RMSE < 5 cm pada kalibrasi lanjutan dengan data lapangan)
-   - **Output**: Prediksi elevasi **T+30 menit, T+1 Jam, T+3 Jam, T+6 Jam**, status **Normal / Siaga / Bahaya**, dan *confidence score*.
+  - **Arsitektur**: `Sequential(Input(24,1) → LSTM(64, return_sequences) → LSTM(32) → Dense(16) → Dense(1))`
+  - **Parameter Terlatih**: `29.857` parameter (*trained on 46.728 samples*, *MinMaxScaler*)
+  - **Metrik Validasi**: **MAE 2,86 cm** | **RMSE 7,40 cm** (target sistem RMSE < 5 cm pada kalibrasi lanjutan dengan data lapangan)
+  - **Output**: Prediksi elevasi **T+30 menit, T+1 Jam, T+3 Jam, T+6 Jam**, status **Normal / Siaga / Bahaya**, dan *confidence score*.
 
 ---
 
@@ -249,7 +252,7 @@ Pipeline pengolahan data di sisi cloud dan engine prediksi:
 ### Langkah Cepat
 ```bash
 # 1. Clone repositori
-git clone https://github.com/Ekazadex/SIMBA.git
+git clone [https://github.com/Ekazadex/SIMBA.git](https://github.com/Ekazadex/SIMBA.git)
 cd SIMBA
 
 # 2. Instal seluruh dependensi
