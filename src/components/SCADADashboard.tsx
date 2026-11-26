@@ -46,7 +46,10 @@ import {
   Zap,
   Map as MapIcon,
   LineChart as LineChartIcon,
-  CloudSun
+  CloudSun,
+  Cloud,
+  CloudLightning,
+  Sun
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -63,6 +66,46 @@ import {
 import { extractReadingTimestamp, normalizeSensorReading } from '../utils/readingUtils';
 import CiliwungHardwareLiveView from './CiliwungHardwareLiveView';
 import { loadHardwareHistory24h } from '../hardware-history';
+
+function BmkgWeatherIcon({
+  src,
+  condition,
+  className,
+}: {
+  src?: string;
+  condition?: string;
+  className: string;
+}) {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const canRenderImg = Boolean(src) && failedSrc !== src;
+
+  if (canRenderImg && src) {
+    return (
+      <img
+        src={src}
+        alt={condition || 'Weather'}
+        className={`${className} object-contain`}
+        referrerPolicy="no-referrer"
+        onError={() => setFailedSrc(src)}
+      />
+    );
+  }
+
+  const label = (condition || '').toLowerCase();
+  if (label.includes('petir') || label.includes('thunder') || label.includes('storm')) {
+    return <CloudLightning className={`${className} text-amber-400`} aria-label={condition} />;
+  }
+  if (label.includes('hujan') || label.includes('rain') || label.includes('shower')) {
+    return <CloudRain className={`${className} text-sky-400`} aria-label={condition} />;
+  }
+  if (label.includes('cerah berawan') || label.includes('partly')) {
+    return <CloudSun className={`${className} text-amber-300`} aria-label={condition} />;
+  }
+  if (label.includes('cerah') || label.includes('clear') || label.includes('sunny')) {
+    return <Sun className={`${className} text-amber-400`} aria-label={condition} />;
+  }
+  return <Cloud className={`${className} text-slate-300`} aria-label={condition} />;
+}
 export { extractReadingTimestamp, normalizeSensorReading };
 
 export function translateConditionToEn(c: string): string {
@@ -711,11 +754,11 @@ export default function SCADADashboard({
       wind_direction = en ? 'Southwest ↗' : 'Barat Daya ↗';
       visibility_km = isStorm ? '1.5 km' : '2.5 km';
       cloud_cover_percent = 100;
-      weather_icon = iconUrl(isStorm ? 'hujan petir.svg' : 'hujan lebat.svg');
+      weather_icon = iconUrl(isStorm ? `hujan petir-${period}.svg` : `hujan lebat-${period}.svg`);
       slotSpecs = [
-        { tempDelta: 0, hu: 96, tp: Math.round(precipNum * 0.75 * 10) / 10, condId: 'Hujan Lebat', condEn: 'Heavy Rain', ws: 15.8, wdId: 'Barat Daya ↗', wdEn: 'Southwest ↗', iconFile: () => 'hujan lebat.svg' },
-        { tempDelta: 1, hu: 93, tp: 11.4, condId: 'Hujan Sedang', condEn: 'Moderate Rain', ws: 11.2, wdId: 'Barat →', wdEn: 'West →', iconFile: () => 'hujan sedang.svg' },
-        { tempDelta: 1, hu: 89, tp: 3.6, condId: 'Hujan Ringan', condEn: 'Light Rain', ws: 7.4, wdId: 'Barat →', wdEn: 'West →', iconFile: () => 'hujan ringan.svg' },
+        { tempDelta: 0, hu: 96, tp: Math.round(precipNum * 0.75 * 10) / 10, condId: 'Hujan Lebat', condEn: 'Heavy Rain', ws: 15.8, wdId: 'Barat Daya ↗', wdEn: 'Southwest ↗', iconFile: (p) => `hujan lebat-${p}.svg` },
+        { tempDelta: 1, hu: 93, tp: 11.4, condId: 'Hujan Sedang', condEn: 'Moderate Rain', ws: 11.2, wdId: 'Barat →', wdEn: 'West →', iconFile: (p) => `hujan sedang-${p}.svg` },
+        { tempDelta: 1, hu: 89, tp: 3.6, condId: 'Hujan Ringan', condEn: 'Light Rain', ws: 7.4, wdId: 'Barat →', wdEn: 'West →', iconFile: (p) => `hujan ringan-${p}.svg` },
         { tempDelta: 2, hu: 85, tp: 0.4, condId: 'Berawan', condEn: 'Mostly Cloudy', ws: 5.1, wdId: 'Selatan ↑', wdEn: 'South ↑', iconFile: (p) => `berawan-${p}.svg` },
       ];
     } else if (level >= siaga) {
@@ -728,10 +771,10 @@ export default function SCADADashboard({
       wind_direction = en ? 'West →' : 'Barat →';
       visibility_km = '4.5 km';
       cloud_cover_percent = 95;
-      weather_icon = iconUrl('hujan sedang.svg');
+      weather_icon = iconUrl(`hujan sedang-${period}.svg`);
       slotSpecs = [
-        { tempDelta: 0, hu: 92, tp: Math.round(precipNum * 0.8 * 10) / 10, condId: 'Hujan Sedang', condEn: 'Moderate Rain', ws: 10.4, wdId: 'Barat →', wdEn: 'West →', iconFile: () => 'hujan sedang.svg' },
-        { tempDelta: 0, hu: 88, tp: 3.8, condId: 'Hujan Ringan', condEn: 'Light Rain', ws: 7.2, wdId: 'Barat Daya ↗', wdEn: 'Southwest ↗', iconFile: () => 'hujan ringan.svg' },
+        { tempDelta: 0, hu: 92, tp: Math.round(precipNum * 0.8 * 10) / 10, condId: 'Hujan Sedang', condEn: 'Moderate Rain', ws: 10.4, wdId: 'Barat →', wdEn: 'West →', iconFile: (p) => `hujan sedang-${p}.svg` },
+        { tempDelta: 0, hu: 88, tp: 3.8, condId: 'Hujan Ringan', condEn: 'Light Rain', ws: 7.2, wdId: 'Barat Daya ↗', wdEn: 'Southwest ↗', iconFile: (p) => `hujan ringan-${p}.svg` },
         { tempDelta: 1, hu: 84, tp: 0.5, condId: 'Berawan', condEn: 'Mostly Cloudy', ws: 5.4, wdId: 'Selatan ↑', wdEn: 'South ↑', iconFile: (p) => `berawan-${p}.svg` },
         { tempDelta: 2, hu: 80, tp: 0, condId: 'Cerah Berawan', condEn: 'Partly Cloudy', ws: 4.1, wdId: 'Tenggara ↖', wdEn: 'Southeast ↖', iconFile: (p) => `cerah berawan-${p}.svg` },
       ];
@@ -745,9 +788,9 @@ export default function SCADADashboard({
       wind_direction = en ? 'South ↑' : 'Selatan ↑';
       visibility_km = '7.5 km';
       cloud_cover_percent = 86;
-      weather_icon = iconUrl('hujan ringan.svg');
+      weather_icon = iconUrl(`hujan ringan-${period}.svg`);
       slotSpecs = [
-        { tempDelta: 0, hu: 86, tp: 2.1, condId: 'Hujan Ringan', condEn: 'Light Rain', ws: 6.8, wdId: 'Selatan ↑', wdEn: 'South ↑', iconFile: () => 'hujan ringan.svg' },
+        { tempDelta: 0, hu: 86, tp: 2.1, condId: 'Hujan Ringan', condEn: 'Light Rain', ws: 6.8, wdId: 'Selatan ↑', wdEn: 'South ↑', iconFile: (p) => `hujan ringan-${p}.svg` },
         { tempDelta: -1, hu: 84, tp: 0.6, condId: 'Berawan', condEn: 'Mostly Cloudy', ws: 5.2, wdId: 'Tenggara ↖', wdEn: 'Southeast ↖', iconFile: (p) => `berawan-${p}.svg` },
         { tempDelta: 0, hu: 81, tp: 0, condId: 'Berawan', condEn: 'Mostly Cloudy', ws: 4.5, wdId: 'Timur ←', wdEn: 'East ←', iconFile: (p) => `berawan-${p}.svg` },
         { tempDelta: 1, hu: 78, tp: 0, condId: 'Cerah Berawan', condEn: 'Partly Cloudy', ws: 4.0, wdId: 'Timur ←', wdEn: 'East ←', iconFile: (p) => `cerah berawan-${p}.svg` },
@@ -1676,16 +1719,11 @@ export default function SCADADashboard({
             {/* Left Zone: Weather Hero (Temperature, Condition & Location) */}
             <div className="md:col-span-1 lg:col-span-4 flex items-center justify-center gap-4">
               <div className="relative flex-shrink-0">
-                {activeWeather.weather_icon ? (
-                  <img
-                    src={activeWeather.weather_icon}
-                    alt={activeWeather.condition}
-                    className="w-16 h-16 object-contain filter drop-shadow"
-                    referrerPolicy="no-referrer"
-                  />
-                ) : (
-                  <CloudRain className="w-16 h-16 text-[#3B82F6] filter drop-shadow" />
-                )}
+                <BmkgWeatherIcon
+                  src={activeWeather.weather_icon}
+                  condition={activeWeather.condition}
+                  className="w-16 h-16 filter drop-shadow"
+                />
               </div>
 
               <div className="min-w-0">
@@ -1794,16 +1832,11 @@ export default function SCADADashboard({
                       <span className={`text-[9.5px] font-mono font-bold tabular-nums ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
                         {slot.time_wib}
                       </span>
-                      {slot.weather_icon ? (
-                        <img
-                          src={slot.weather_icon}
-                          alt={slot.condition}
-                          className="w-7 h-7 my-1 object-contain"
-                          referrerPolicy="no-referrer"
-                        />
-                      ) : (
-                        <CloudRain className="w-5 h-5 my-1.5 text-sky-400" />
-                      )}
+                      <BmkgWeatherIcon
+                        src={slot.weather_icon}
+                        condition={slot.condition}
+                        className="w-7 h-7 my-1"
+                      />
                       <span className={`text-xs font-bold tabular-nums ${isDark ? 'text-white' : 'text-slate-900'}`}>
                         {slot.temperature_c}°
                       </span>
